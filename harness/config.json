@@ -1,7 +1,7 @@
 {
   "base_branch": "main",
-  "test_cmd": "python3 -m pytest -q",
-  "setup_cmd": "",
+  "test_cmd": "uv run pytest -q",
+  "setup_cmd": "uv sync",
   "gates": {
     "approve": "human",
     "merge": "human"

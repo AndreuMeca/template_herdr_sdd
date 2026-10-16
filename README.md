@@ -6,7 +6,8 @@ under [herdr](https://herdr.dev). Everything harness-related lives in `harness/`
 root is the map every agent reads. The rest of the repo is your project.
 
 ## Prerequisites
-- git, python3 (3.9+, stdlib only)
+- git, and python3 (3.9+) or [uv](https://docs.astral.sh/uv/): the launcher is stdlib only, so
+  `python3 harness/harness.py ...` and `uv run harness/harness.py ...` are equivalent
 - [herdr](https://herdr.dev/docs/install/) (`curl -fsSL https://herdr.dev/install.sh | sh`)
 - The agent CLIs you name in `harness/config.json` (for example `claude`, `codex`, `pi`), logged in
 
@@ -14,7 +15,8 @@ root is the map every agent reads. The rest of the repo is your project.
 1. Copy this template and start fresh history:
    `git clone <this repo> myproject && cd myproject && rm -rf .git && git init -b main`
 2. Edit `AGENTS.md` §1 (what the project is, where code and tests live, how to run tests).
-3. Edit `harness/config.json`: `test_cmd`, optional `setup_cmd`, the two `gates` (`approve` and `merge`,
+3. Edit `harness/config.json`: `test_cmd` and optional `setup_cmd` (the defaults assume a uv project:
+   `uv run pytest -q` and `uv sync`), the two `gates` (`approve` and `merge`,
    each `human` to stop and wait for you, the default, or `auto` to let the orchestrator run them), and
    for each role the agent CLI
    (`kind`, one of herdr's agent kinds), the `model`, and extra CLI `args`. Role agents need

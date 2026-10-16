@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/run/wait/merge also need herdr.
 
   harness.py status                        board across every worktree                 (anyone)

@@ -4,7 +4,7 @@
 
 ## 1. Project
 - What it is: <one paragraph: what this software does and for whom>
-- Code: `<src/>`   Tests: `<tests/>`   Run tests: `<python3 -m pytest -q>` (same as `test_cmd` in `harness/config.json`)
+- Code: `<src/>`   Tests: `<tests/>`   Run tests: `<uv run pytest -q>` (same as `test_cmd` in `harness/config.json`)
 - Conventions: <style, naming, commit style, anything non-obvious an agent would get wrong>
 
 ## 2. Two lanes
