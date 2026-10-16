@@ -1,0 +1,11 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# node
+node_modules/
+# agent-local state (never commit)
+.claude/settings.local.json
+# os
+.DS_Store

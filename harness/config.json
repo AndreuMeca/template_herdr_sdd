@@ -1,0 +1,37 @@
+{
+  "base_branch": "main",
+  "test_cmd": "python3 -m pytest -q",
+  "setup_cmd": "",
+  "agents": {
+    "orchestrator": {
+      "kind": "claude",
+      "model": "claude-opus-5-5",
+      "args": [
+        "--permission-mode",
+        "acceptEdits"
+      ]
+    },
+    "spec_author": {
+      "kind": "claude",
+      "model": "claude-sonnet-5-5",
+      "args": [
+        "--dangerously-skip-permissions"
+      ]
+    },
+    "implementer": {
+      "kind": "codex",
+      "model": "",
+      "args": [
+        "--ask-for-approval",
+        "never",
+        "--sandbox",
+        "workspace-write"
+      ]
+    },
+    "reviewer": {
+      "kind": "pi",
+      "model": "anthropic/claude-sonnet-5-5",
+      "args": []
+    }
+  }
+}
