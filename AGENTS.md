@@ -21,7 +21,7 @@ You were started by a human in this repo, inside herdr. When they ask for a feat
 python3 harness/harness.py start <slug> "what the feature must do"   # worktree + branch + feature folder
 ```
 then follow `harness/roles/orchestrator.md` for that slug: it runs the spec author, implementer and
-reviewer one at a time inside that worktree and stops at the two human gates. The human approves with
+reviewer one at a time, each in its own tab of the worktree's herdr workspace, and stops at the two human gates. The human approves with
 `python3 harness/harness.py approve <slug>` and merges with `python3 harness/harness.py merge <slug>`;
 run those yourself only when the human says so. `python3 harness/harness.py status` shows every feature
 in every worktree. Pick the slug yourself if the human gives none: short, lowercase, dashes.

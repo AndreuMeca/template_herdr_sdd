@@ -9,7 +9,8 @@ this file wins.
 One feature = one slug = one folder `harness/features/<slug>/` = one branch = one worktree. The
 orchestrator is the agent the human talks to on the base checkout (or a dedicated agent inside the
 worktree, with `start --detach`). Role agents (spec_author, implementer, reviewer) run one at a time
-inside the feature's worktree, so there is never more than one writer in a checkout.
+inside the feature's worktree, each in a tab of its herdr workspace labelled with the role, so there is
+never more than one writer in a checkout.
 
 | status | set by | means | next |
 |---|---|---|---|

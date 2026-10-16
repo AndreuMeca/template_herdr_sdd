@@ -222,16 +222,13 @@ def find_key(obj, key):
     return None
 
 
-def worktree_pane(root: Path, wt: Path) -> str:
-    """A pane inside the herdr workspace of this worktree; opens the workspace if it is closed."""
+def worktree_workspace(root: Path, wt: Path) -> str:
+    """The herdr workspace id of this worktree; opens the workspace if it is closed."""
     wts = herdr("worktree", "list", "--cwd", root).get("worktrees", [])
     ws_id = next((w.get("open_workspace_id") for w in wts if Path(w.get("path", "")).resolve() == wt.resolve()), None)
-    if not ws_id:
-        return herdr("worktree", "open", "--cwd", root, "--path", wt, "--no-focus")["root_pane"]["pane_id"]
-    panes = herdr("pane", "list", "--workspace", ws_id).get("panes", [])
-    if not panes:
-        die(f"herdr workspace {ws_id} for {wt} has no panes")
-    return panes[0]["pane_id"]
+    if ws_id:
+        return ws_id
+    return herdr("worktree", "open", "--cwd", root, "--path", wt, "--no-focus")["workspace"]["workspace_id"]
 
 
 def agent_name(role: str, slug: str) -> str:
@@ -293,7 +290,7 @@ def settle_startup(name: str, timeout_s: int = 60) -> bool:
 
 
 def prompt_or_start(root: Path, wt: Path, role: str, slug: str, text: str, timeout_ms: int, acfg: dict) -> tuple[bool, str]:
-    """Prompt the role agent, starting it in a new pane of the worktree's workspace if it does not exist yet.
+    """Prompt the role agent, starting it in its own tab of the worktree's workspace if it does not exist yet.
     Returns (settled, note)."""
     name = agent_name(role, slug)
     for attempt in (1, 2):
@@ -302,9 +299,9 @@ def prompt_or_start(root: Path, wt: Path, role: str, slug: str, text: str, timeo
             return True, ""
         except HerdrError as e:
             if e.code == "agent_not_found" and attempt == 1:
-                anchor = worktree_pane(root, wt)
-                pane = herdr("pane", "split", "--pane", anchor, "--direction", "right", "--cwd", wt, "--no-focus")
-                pane_id = find_key(pane, "pane_id") or die(f"pane split returned no pane_id: {pane}")
+                ws_id = worktree_workspace(root, wt)
+                tab = herdr("tab", "create", "--workspace", ws_id, "--cwd", wt, "--label", role, "--no-focus")
+                pane_id = find_key(tab.get("root_pane", tab), "pane_id") or die(f"tab create returned no pane_id: {tab}")
                 try:
                     herdr("agent", "start", name, "--kind", acfg["kind"], "--pane", pane_id,
                           "--timeout", 120_000, *agent_cli_args(acfg))
@@ -527,6 +524,12 @@ def cmd_start(a):
         print(f"next: harness.py run spec_author {a.slug}")
         return 0
     acfg = cfg["agents"]["orchestrator"]
+    tab_id = find_key(res.get("tab", {}), "tab_id")
+    if tab_id:
+        try:
+            herdr("tab", "rename", tab_id, "orchestrator")
+        except HerdrError:
+            pass
     started = False
     for attempt in range(3):  # the new pane's shell may need a moment to reach its prompt
         try:

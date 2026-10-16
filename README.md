@@ -28,7 +28,8 @@ root is the map every agent reads. The rest of the repo is your project.
 You, to the agent you started on `main`: "Build email+password login with a cookie session."
 The agent runs `python3 harness/harness.py start login "..."`, which creates a worktree
 (`~/.herdr/worktrees/<repo>/login`), the branch `login`, and `harness/features/login/`. It then runs the
-spec author, implementer and reviewer one after another in panes of that worktree's workspace and stops
+spec author, implementer and reviewer one after another, each in its own tab of that worktree's
+workspace (labelled with the role), and stops
 at the two human gates:
 ```
 python3 harness/harness.py status          # spec_ready: read harness/features/login/spec.md, then
@@ -38,7 +39,8 @@ python3 harness/harness.py merge login
 ```
 You can type those yourself or tell the agent "approved" / "merge it". Several features can run in
 parallel, each in its own worktree. `start --detach` instead starts a dedicated orchestrator agent inside
-the worktree, for work you want to leave running on its own; talk to it by focusing its pane or
+the worktree (in a tab labelled `orchestrator`), for work you want to leave running on its own; talk to
+it by focusing its tab or
 `herdr agent prompt <slug> "..."`. If the repo itself is not open in herdr yet, herdr opens a workspace
 for it when the first worktree is created.
 
