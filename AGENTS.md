@@ -15,14 +15,16 @@
 ## 3. If your prompt names a file in `harness/roles/`
 That file is your job description and is authoritative. Read it, then `harness/docs/sdd.md`.
 
-## 4. Human on the base branch, inside herdr
+## 4. Building a feature (you, the agent the human is talking to)
+You were started by a human in this repo, inside herdr. When they ask for a feature:
 ```
-python3 harness/harness.py start <slug> "intent"   # new worktree + orchestrator agent for one feature
-python3 harness/harness.py status                   # board across every worktree
-python3 harness/harness.py approve <slug>           # after reading harness/features/<slug>/spec.md
-python3 harness/harness.py merge <slug>             # after the reviewer's APPROVED
+python3 harness/harness.py start <slug> "what the feature must do"   # worktree + branch + feature folder
 ```
-Talk to an orchestrator by focusing its pane, or `herdr agent prompt <slug> "..."`.
+then follow `harness/roles/orchestrator.md` for that slug: it runs the spec author, implementer and
+reviewer one at a time inside that worktree and stops at the two human gates. The human approves with
+`python3 harness/harness.py approve <slug>` and merges with `python3 harness/harness.py merge <slug>`;
+run those yourself only when the human says so. `python3 harness/harness.py status` shows every feature
+in every worktree. Pick the slug yourself if the human gives none: short, lowercase, dashes.
 
 ## 5. Rules for everyone
 - Commit messages start with the feature slug: `<slug>: <what>`.

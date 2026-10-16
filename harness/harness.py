@@ -2,8 +2,9 @@
 """SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/run/wait/merge also need herdr.
 
   harness.py status                        board across every worktree                 (anyone)
-  harness.py start <slug> ["intent"]       new worktree + feature + orchestrator agent  (human, base branch)
-  harness.py run <role> <slug> ["msg"]     run a role agent in this worktree            (orchestrator)
+  harness.py start <slug> ["intent"]       new worktree + branch + feature folder       (orchestrator or human, base branch)
+                     [--detach]            ... plus a dedicated orchestrator agent in it
+  harness.py run <role> <slug> ["msg"]     run a role agent in the feature's worktree   (orchestrator, from anywhere)
   harness.py wait <role> <slug>            keep waiting for a running role agent        (orchestrator)
   harness.py approve <slug>                approve a spec and notify the orchestrator   (human)
   harness.py merge <slug>                  merge an approved, reviewed feature          (human, base branch)
@@ -15,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -222,9 +222,16 @@ def find_key(obj, key):
     return None
 
 
-def require_herdr_env():
-    if os.environ.get("HERDR_ENV") != "1" or not os.environ.get("HERDR_PANE_ID"):
-        die("must run inside a herdr pane (HERDR_ENV=1); orchestrators are started with: harness.py start <slug>")
+def worktree_pane(root: Path, wt: Path) -> str:
+    """A pane inside the herdr workspace of this worktree; opens the workspace if it is closed."""
+    wts = herdr("worktree", "list", "--cwd", root).get("worktrees", [])
+    ws_id = next((w.get("open_workspace_id") for w in wts if Path(w.get("path", "")).resolve() == wt.resolve()), None)
+    if not ws_id:
+        return herdr("worktree", "open", "--cwd", root, "--path", wt, "--no-focus")["root_pane"]["pane_id"]
+    panes = herdr("pane", "list", "--workspace", ws_id).get("panes", [])
+    if not panes:
+        die(f"herdr workspace {ws_id} for {wt} has no panes")
+    return panes[0]["pane_id"]
 
 
 def agent_name(role: str, slug: str) -> str:
@@ -285,8 +292,9 @@ def settle_startup(name: str, timeout_s: int = 60) -> bool:
     return agent_state(name) in ("idle", "done")
 
 
-def prompt_or_start(wt: Path, role: str, slug: str, text: str, timeout_ms: int, acfg: dict) -> tuple[bool, str]:
-    """Prompt the role agent, starting it in a sibling pane if it does not exist. Returns (settled, note)."""
+def prompt_or_start(root: Path, wt: Path, role: str, slug: str, text: str, timeout_ms: int, acfg: dict) -> tuple[bool, str]:
+    """Prompt the role agent, starting it in a new pane of the worktree's workspace if it does not exist yet.
+    Returns (settled, note)."""
     name = agent_name(role, slug)
     for attempt in (1, 2):
         try:
@@ -294,7 +302,8 @@ def prompt_or_start(wt: Path, role: str, slug: str, text: str, timeout_ms: int, 
             return True, ""
         except HerdrError as e:
             if e.code == "agent_not_found" and attempt == 1:
-                pane = herdr("pane", "split", "--current", "--direction", "right", "--cwd", wt, "--no-focus")
+                anchor = worktree_pane(root, wt)
+                pane = herdr("pane", "split", "--pane", anchor, "--direction", "right", "--cwd", wt, "--no-focus")
                 pane_id = find_key(pane, "pane_id") or die(f"pane split returned no pane_id: {pane}")
                 try:
                     herdr("agent", "start", name, "--kind", acfg["kind"], "--pane", pane_id,
@@ -313,9 +322,9 @@ def prompt_or_start(wt: Path, role: str, slug: str, text: str, timeout_ms: int, 
     return False, "unreachable"
 
 
-def report(root: Path, role: str, slug: str, settled: bool, note: str = "") -> int:
+def report(wt: Path, role: str, slug: str, settled: bool, note: str = "") -> int:
     name = agent_name(role, slug)
-    st, vd = feature_state(feature_dir(root, slug))
+    st, vd = feature_state(feature_dir(wt, slug))
     state = agent_state(name)
     if not settled:
         result = "STILL_WORKING"
@@ -513,6 +522,10 @@ def cmd_start(a):
         p = subprocess.run(cfg["setup_cmd"], shell=True, cwd=wt, text=True, capture_output=True, stdin=subprocess.DEVNULL)
         print("setup_cmd:", "ok" if p.returncode == 0 else f"FAILED (exit {p.returncode}); fix it in the worktree\n{(p.stdout + p.stderr).strip()[-800:]}")
 
+    print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")
+    if not a.detach:
+        print(f"next: harness.py run spec_author {a.slug}")
+        return 0
     acfg = cfg["agents"]["orchestrator"]
     started = False
     for attempt in range(3):  # the new pane's shell may need a moment to reach its prompt
@@ -540,8 +553,7 @@ def cmd_start(a):
             print(f"warning: prompt -> {e.code}: {e.message}\nsend it yourself: herdr agent prompt {a.slug} \"{text}\"")
     else:
         print(f"start the orchestrator yourself in pane {pane_id}, then: herdr agent prompt {a.slug} \"{text}\"")
-    print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  agent: {a.slug}")
-    print(f"peek: herdr agent read {a.slug} --source recent-unwrapped --lines 60")
+    print(f"detached orchestrator agent: {a.slug}   peek: herdr agent read {a.slug} --source recent-unwrapped --lines 60")
     return 0
 
 
@@ -555,28 +567,34 @@ def drop_review(root: Path, slug: str):
         review.unlink()
 
 
+def live_worktree(root: Path, slug: str) -> dict:
+    f = locate(root, slug)
+    if f["branch"] != slug:
+        die(f"'{slug}' has no live worktree (status {f['status'] or '?'} on '{f['branch'] or 'detached'}'); create one with: harness.py start {slug}")
+    return f
+
+
 def cmd_run(a):
-    require_herdr_env()
     root = repo_root()
     cfg = load_cfg(root)
-    branch = current_branch(root)
-    if branch != a.slug:
-        die(f"run inside the worktree of '{a.slug}' (current branch is '{branch or 'detached'}')")
-    st, vd = feature_state(feature_dir(root, a.slug))
+    f = live_worktree(root, a.slug)
+    wt, st, vd = f["wt"], f["status"], f["verdict"]
     if st not in RUN_GATE[a.role]:
         die(f"cannot run {a.role} while status is '{st or '(none)'}' (allowed: {', '.join(sorted(RUN_GATE[a.role]))}); next: {next_action(st, vd)}")
+    if git("status", "--porcelain", cwd=wt):
+        die(f"worktree {wt} has uncommitted changes; a role agent must not start on top of them")
     if a.role == "reviewer" or (a.role == "implementer" and vd == "APPROVED"):
-        drop_review(root, a.slug)
+        drop_review(wt, a.slug)
     text = f"Read harness/roles/{a.role}.md and follow it for harness/features/{a.slug}/."
     if a.msg:
         text += " " + " ".join(a.msg.split())
-    settled, note = prompt_or_start(root, a.role, a.slug, text, a.timeout, cfg["agents"][a.role])
-    return report(root, a.role, a.slug, settled, note)
+    settled, note = prompt_or_start(root, wt, a.role, a.slug, text, a.timeout, cfg["agents"][a.role])
+    return report(wt, a.role, a.slug, settled, note)
 
 
 def cmd_wait(a):
-    require_herdr_env()
     root = repo_root()
+    wt = live_worktree(root, a.slug)["wt"]
     name = agent_name(a.role, a.slug)
     try:
         herdr("agent", "wait", name, "--timeout", a.timeout)
@@ -588,7 +606,7 @@ def cmd_wait(a):
             die(f"no agent '{name}'; start it with: harness.py run {a.role} {a.slug}")
         else:
             settled, note = True, e.code
-    return report(root, a.role, a.slug, settled, note)
+    return report(wt, a.role, a.slug, settled, note)
 
 
 def cmd_approve(a):
@@ -608,9 +626,12 @@ def cmd_approve(a):
     print(f"approved {a.slug} (committed on '{f['branch']}')")
     try:
         herdr("agent", "prompt", a.slug, "Spec approved. Continue.")
-        print(f"orchestrator '{a.slug}' notified")
+        print(f"detached orchestrator '{a.slug}' notified")
     except HerdrError as e:
-        print(f"warning: could not notify orchestrator '{a.slug}' ({e.code}); tell it yourself: herdr agent prompt {a.slug} \"Spec approved. Continue.\"")
+        if e.code == "agent_not_found":
+            print(f"next: harness.py run implementer {a.slug}")
+        else:
+            print(f"warning: could not notify detached orchestrator '{a.slug}' ({e.code}: {e.message})")
     return 0
 
 
@@ -674,13 +695,14 @@ def main(argv=None) -> int:
 
     sub.add_parser("status", help="board across every worktree").set_defaults(fn=cmd_status)
 
-    s = sub.add_parser("start", help="new worktree + feature + orchestrator agent (human, base branch)")
+    s = sub.add_parser("start", help="new worktree + branch + feature folder (orchestrator or human, base branch)")
     s.add_argument("slug")
     s.add_argument("intent", nargs="?", default="")
+    s.add_argument("--detach", action="store_true", help="also start a dedicated orchestrator agent inside the worktree")
     s.add_argument("--trust", action="store_true", help="pass --trust-repository to herdr (only after verifying the repo)")
     s.set_defaults(fn=cmd_start)
 
-    for name, fn, help_ in (("run", cmd_run, "run a role agent in this worktree (orchestrator)"),
+    for name, fn, help_ in (("run", cmd_run, "run a role agent in the feature's worktree (orchestrator, from anywhere)"),
                             ("wait", cmd_wait, "keep waiting for a running role agent (orchestrator)")):
         s = sub.add_parser(name, help=help_)
         s.add_argument("role", choices=list(ROLES))

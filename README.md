@@ -18,25 +18,29 @@ root is the map every agent reads. The rest of the repo is your project.
    (`kind`, one of herdr's agent kinds), the `model`, and extra CLI `args`. Role agents need
    non-interactive permission flags or they stop at the first approval dialog. The launcher answers
    Claude Code's two startup dialogs by itself (trust this folder, bypass-permissions warning); any other
-   dialog is reported as NEEDS_ATTENTION for you or the orchestrator to answer.
+   dialog is reported as NEEDS_ATTENTION for the orchestrator or you to answer. The `orchestrator` entry
+   is only used by `start --detach`.
 4. Add your project code anywhere outside `harness/`. Commit.
-5. Open herdr in the repo (`herdr`), then from a shell pane on `main`:
-   `python3 harness/harness.py start <slug> "what the feature must do"`
+5. Open herdr, open a workspace in the repo, start your agent (`claude`, `codex`, `pi`, ...) and ask for
+   a feature. It reads `AGENTS.md` and takes it from there.
 
 ## Daily flow
+You, to the agent you started on `main`: "Build email+password login with a cookie session."
+The agent runs `python3 harness/harness.py start login "..."`, which creates a worktree
+(`~/.herdr/worktrees/<repo>/login`), the branch `login`, and `harness/features/login/`. It then runs the
+spec author, implementer and reviewer one after another in panes of that worktree's workspace and stops
+at the two human gates:
 ```
-python3 harness/harness.py start login "Email+password login with a cookie session"
-python3 harness/harness.py status                      # when it says spec_ready:
-python3 harness/harness.py approve login               # read harness/features/login/spec.md first
-python3 harness/harness.py status                      # when it says review + APPROVED:
+python3 harness/harness.py status          # spec_ready: read harness/features/login/spec.md, then
+python3 harness/harness.py approve login   # ... the agent continues with implementer and reviewer
+python3 harness/harness.py status          # review + APPROVED:
 python3 harness/harness.py merge login
 ```
-Each `start` creates a worktree (`~/.herdr/worktrees/<repo>/<slug>`), a branch named after the slug and
-an orchestrator agent inside it (if the repo itself is not open in herdr yet, herdr opens a workspace for
-it too). The orchestrator runs the spec author, implementer and reviewer one
-after another in sibling panes of its worktree and stops at the two human gates: approving the spec and
-merging. Several features run in parallel, each in its own worktree. Talk to an orchestrator by focusing
-its pane or `herdr agent prompt <slug> "..."`.
+You can type those yourself or tell the agent "approved" / "merge it". Several features can run in
+parallel, each in its own worktree. `start --detach` instead starts a dedicated orchestrator agent inside
+the worktree, for work you want to leave running on its own; talk to it by focusing its pane or
+`herdr agent prompt <slug> "..."`. If the repo itself is not open in herdr yet, herdr opens a workspace
+for it when the first worktree is created.
 
 ## Layout
 ```

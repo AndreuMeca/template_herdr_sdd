@@ -6,9 +6,10 @@ this file wins.
 
 ## 1. Lifecycle
 
-One feature = one slug = one folder `harness/features/<slug>/` = one branch = one worktree = one
-orchestrator agent. Role agents (spec_author, implementer, reviewer) run one at a time inside that
-worktree, so there is never more than one writer in a checkout.
+One feature = one slug = one folder `harness/features/<slug>/` = one branch = one worktree. The
+orchestrator is the agent the human talks to on the base checkout (or a dedicated agent inside the
+worktree, with `start --detach`). Role agents (spec_author, implementer, reviewer) run one at a time
+inside the feature's worktree, so there is never more than one writer in a checkout.
 
 | status | set by | means | next |
 |---|---|---|---|
@@ -106,8 +107,9 @@ An unchecked box means `CHANGES_REQUESTED`.
 
 ```
 python3 harness/harness.py status                       board across every worktree (anyone)
-python3 harness/harness.py start <slug> ["intent"]      worktree + feature + orchestrator (human, base branch)
-python3 harness/harness.py run <role> <slug> ["msg"]    run a role agent here (orchestrator, inside its worktree)
+python3 harness/harness.py start <slug> ["intent"]      worktree + branch + feature folder (orchestrator or human, base branch)
+                                   --detach             also start a dedicated orchestrator agent in the worktree
+python3 harness/harness.py run <role> <slug> ["msg"]    run a role agent in the feature's worktree (orchestrator, from anywhere)
 python3 harness/harness.py wait <role> <slug>           keep waiting for a running role agent (orchestrator)
 python3 harness/harness.py approve <slug>               approve a spec, notify the orchestrator (human)
 python3 harness/harness.py merge <slug>                 merge, mark done, remove the worktree (human, base branch)
