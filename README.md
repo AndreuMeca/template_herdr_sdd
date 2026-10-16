@@ -15,7 +15,8 @@ root is the map every agent reads. The rest of the repo is your project.
 1. Copy this template and start fresh history:
    `git clone <this repo> myproject && cd myproject && rm -rf .git && git init -b main`
 2. Edit `AGENTS.md` §1 (what the project is, where code and tests live, how to run tests).
-3. Edit `harness/config.json`: `test_cmd` and optional `setup_cmd` (the defaults assume a uv project:
+3. Edit `harness/config.json` (every key and value is explained in `harness/config.md`): `test_cmd` and
+   optional `setup_cmd` (the defaults assume a uv project:
    `uv run pytest -q` and `uv sync`), the two `gates` (`approve` and `merge`,
    each `human` to stop and wait for you, the default, or `auto` to let the orchestrator run them), and
    for each role the agent CLI
@@ -53,7 +54,8 @@ for it when the first worktree is created.
 ```
 AGENTS.md                      the map (read natively by Claude Code, Codex, pi)
 harness/
-  config.json                  agent kind + model per role, test/setup commands (the only tool-specific file)
+  config.json                  agent kind + model per role, gates, test/setup commands (the only tool-specific file)
+  config.md                    what every key in config.json means and which values it accepts
   harness.py                   status | start | run | wait | approve | merge | check
   docs/sdd.md                  all the rules: lifecycle, file formats, EARS, traceability, checkpoints
   roles/*.md                   job description of orchestrator, spec_author, implementer, reviewer
