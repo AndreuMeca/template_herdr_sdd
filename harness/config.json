@@ -1,5 +1,5 @@
 {
-  "_help": "every key, its allowed values and examples per agent CLI: harness/config.md",
+  "_help": "every key, its allowed values and examples per agent CLI: harness/help/config.md",
   "base_branch": "main",
   "test_cmd": "uv run pytest -q",
   "setup_cmd": "uv sync",
