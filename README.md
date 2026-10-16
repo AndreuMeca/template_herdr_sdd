@@ -14,7 +14,9 @@ root is the map every agent reads. The rest of the repo is your project.
 1. Copy this template and start fresh history:
    `git clone <this repo> myproject && cd myproject && rm -rf .git && git init -b main`
 2. Edit `AGENTS.md` §1 (what the project is, where code and tests live, how to run tests).
-3. Edit `harness/config.json`: `test_cmd`, optional `setup_cmd`, and for each role the agent CLI
+3. Edit `harness/config.json`: `test_cmd`, optional `setup_cmd`, the two `gates` (`approve` and `merge`,
+   each `human` to stop and wait for you, the default, or `auto` to let the orchestrator run them), and
+   for each role the agent CLI
    (`kind`, one of herdr's agent kinds), the `model`, and extra CLI `args`. Role agents need
    non-interactive permission flags or they stop at the first approval dialog. The launcher answers
    Claude Code's two startup dialogs by itself (trust this folder, bypass-permissions warning); any other
@@ -37,7 +39,8 @@ python3 harness/harness.py approve login   # ... the agent continues with implem
 python3 harness/harness.py status          # review + APPROVED:
 python3 harness/harness.py merge login
 ```
-You can type those yourself or tell the agent "approved" / "merge it". Several features can run in
+You can type those yourself, tell the agent "approved" / "merge it", or set the gates to `auto` in
+`harness/config.json` so the agent goes from request to merged feature without stopping. Several features can run in
 parallel, each in its own worktree. `start --detach` instead starts a dedicated orchestrator agent inside
 the worktree (in a tab labelled `orchestrator`), for work you want to leave running on its own; talk to
 it by focusing its tab or

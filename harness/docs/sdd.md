@@ -22,9 +22,10 @@ never more than one writer in a checkout.
 | `done` | `merge` (human) | merged into the base branch, worktree removed | — |
 | `blocked` | spec_author or implementer | needs a human decision (`## Open questions` or `log.md`) | human answers; re-run the role with the answer as message |
 
-The only human gates are `approve` and `merge`. The only commands that write to the base branch are
-`approve` (a status flip on the feature branch, actually) and `merge`. Everything else happens on the
-feature branch.
+The only gates are `approve` and `merge`. `gates` in `harness/config.json` sets each one to `human`
+(the orchestrator stops and waits for the human, the default) or `auto` (the orchestrator runs the
+command itself). The board's NEXT column shows which applies. The only command that writes to the base
+branch is `merge`; everything else happens on the feature branch.
 
 ## 2. Feature files
 

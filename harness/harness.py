@@ -102,6 +102,11 @@ def load_cfg(root: Path) -> dict:
     for role in ("orchestrator", *ROLES):
         if not isinstance(cfg["agents"].get(role), dict) or not cfg["agents"][role].get("kind"):
             die(f"{p}: agents.{role}.kind is required")
+    gates = cfg.setdefault("gates", {})
+    for gate in ("approve", "merge"):
+        gates.setdefault(gate, "human")
+        if gates[gate] not in ("human", "auto"):
+            die(f"{p}: gates.{gate} must be 'human' or 'auto'")
     return cfg
 
 
@@ -169,12 +174,13 @@ def locate(root: Path, slug: str) -> dict:
     return f
 
 
-def next_action(st: str, vd: str) -> str:
+def next_action(st: str, vd: str, gates: dict | None = None) -> str:
+    gates = gates or {}
     if st == "review":
-        return "merge (human)" if vd == "APPROVED" else "run reviewer"
+        return f"merge ({gates.get('merge', 'human')})" if vd == "APPROVED" else "run reviewer"
     return {
         "pending": "run spec_author",
-        "spec_ready": "approve (human)",
+        "spec_ready": f"approve ({gates.get('approve', 'human')})",
         "approved": "run implementer",
         "in_progress": "run implementer",
         "blocked": "human: read spec.md Open questions / log.md",
@@ -339,7 +345,7 @@ def report(wt: Path, role: str, slug: str, settled: bool, note: str = "") -> int
     print(agent_tail(name).rstrip())
     print("---")
     if result == "DONE":
-        print(f"next: {next_action(st, vd)}")
+        print(f"next: {next_action(st, vd, load_cfg(wt)['gates'])}")
         return EXIT_DONE
     print(f"inspect: herdr agent read {name} --source recent-unwrapped --lines 120")
     print(f"answer a dialog: herdr agent send-keys {name} <key>   (or ask the human)")
@@ -447,6 +453,7 @@ def run_check(root: Path, slugs: list[str], tests: bool | None) -> list[str]:
 # ----------------------------------------------------------------------------- commands
 def cmd_status(a):
     root = repo_root()
+    gates = load_cfg(root)["gates"]
     feats = features_everywhere(root)
     if not feats:
         print('no features yet. start one: harness.py start <slug> "intent"')
@@ -455,7 +462,7 @@ def cmd_status(a):
     rows = [("SLUG", "STATUS", "VERDICT", "BRANCH@PATH", "NEXT")]
     for slug, f in sorted(feats.items()):
         where = f"{f['branch'] or '(detached)'}@{str(f['wt']).replace(home, '~', 1)}"
-        rows.append((slug, f["status"] or "?", f["verdict"] or "-", where, next_action(f["status"], f["verdict"])))
+        rows.append((slug, f["status"] or "?", f["verdict"] or "-", where, next_action(f["status"], f["verdict"], gates)))
     widths = [max(len(r[i]) for r in rows) for i in range(5)]
     for r in rows:
         print("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
@@ -466,6 +473,10 @@ def cmd_check(a):
     root = repo_root()
     if a.slug:
         slugs = [a.slug]
+        if not (feature_dir(root, a.slug) / "spec.md").exists():
+            f = locate(root, a.slug)  # the feature lives in another worktree: check it there
+            root = f["wt"]
+            print(f"checking {a.slug} in {root}")
     else:
         slugs = sorted(p.name for p in (root / "harness" / "features").glob("*") if p.is_dir() and not p.name.startswith("_"))
     tests = True if a.tests else (False if a.no_tests else None)
@@ -583,7 +594,7 @@ def cmd_run(a):
     f = live_worktree(root, a.slug)
     wt, st, vd = f["wt"], f["status"], f["verdict"]
     if st not in RUN_GATE[a.role]:
-        die(f"cannot run {a.role} while status is '{st or '(none)'}' (allowed: {', '.join(sorted(RUN_GATE[a.role]))}); next: {next_action(st, vd)}")
+        die(f"cannot run {a.role} while status is '{st or '(none)'}' (allowed: {', '.join(sorted(RUN_GATE[a.role]))}); next: {next_action(st, vd, cfg['gates'])}")
     if git("status", "--porcelain", cwd=wt):
         die(f"worktree {wt} has uncommitted changes; a role agent must not start on top of them")
     if a.role == "reviewer" or (a.role == "implementer" and vd == "APPROVED"):

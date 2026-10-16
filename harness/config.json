@@ -2,6 +2,10 @@
   "base_branch": "main",
   "test_cmd": "python3 -m pytest -q",
   "setup_cmd": "",
+  "gates": {
+    "approve": "human",
+    "merge": "human"
+  },
   "agents": {
     "orchestrator": {
       "kind": "claude",
