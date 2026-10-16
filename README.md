@@ -55,7 +55,7 @@ for it when the first worktree is created.
 AGENTS.md                      the map (read natively by Claude Code, Codex, pi)
 harness/
   config.json                  agent kind + model per role, gates, test/setup commands (the only tool-specific file)
-  config.md                    what every key in config.json means and which values it accepts
+  help/config.md               what every key in config.json means and which values it accepts
   harness.py                   status | start | run | wait | approve | merge | check
   docs/sdd.md                  all the rules: lifecycle, file formats, EARS, traceability, checkpoints
   roles/*.md                   job description of orchestrator, spec_author, implementer, reviewer
