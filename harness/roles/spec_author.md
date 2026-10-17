@@ -21,6 +21,6 @@ not write code. Read `AGENTS.md`, `harness/docs/sdd.md` §2–4 and §7, then th
    `status: blocked` and stop. Never set any other status.
 
 ## Before you stop
-- `python3 harness/harness.py check <slug>` is green (rules 1–3).
+- `uv run harness/harness.py check <slug>` is green (rules 1–3).
 - `git add harness/features/<slug> && git commit -m "<slug>: spec"` (or `"<slug>: spec revised"`).
 - Reply with one line: `spec_ready` or `blocked`, plus the R count.

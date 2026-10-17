@@ -8,7 +8,7 @@ Unknown keys (like `_help`) are ignored by the launcher.
 | key | required | values | what it does |
 |---|---|---|---|
 | `base_branch` | yes | a branch name, usually `main` | `start` forks feature branches from it; `merge` merges them back into it. |
-| `test_cmd` | yes | a shell command | Run from the repo (or worktree) root by `check` from status `review` on, and by `merge` on the merged tree. Exit 0 means green. Examples: `uv run pytest -q`, `python3 -m unittest discover -s tests -q`, `npm test`. |
+| `test_cmd` | yes | a shell command | Run from the repo (or worktree) root by `check` from status `review` on, and by `merge` on the merged tree. Exit 0 means green. Examples: `uv run pytest -q`, `uv run python -m unittest discover -s tests -q`, `npm test`. |
 | `setup_cmd` | no | a shell command or `""` | Run once by `start` inside the new worktree, before any agent works there. Use it to create the environment: `uv sync`, `npm ci`. Empty means nothing to do. |
 | `gates.approve` | no | `human` (default) or `auto` | Who approves a spec. `human`: the orchestrator stops after the spec and waits for you to run `approve <slug>` or say "approved". `auto`: the orchestrator judges the spec and runs `approve` itself. |
 | `gates.merge` | no | `human` (default) or `auto` | Who merges. `human`: the orchestrator stops after the reviewer's APPROVED and waits for `merge <slug>`. `auto`: the orchestrator merges itself, unless it is a detached orchestrator inside the worktree (merging would delete its own workspace), in which case it stops and tells you. |
@@ -90,7 +90,7 @@ Cheap, for trying the harness out:
 ```json
 {
   "base_branch": "main",
-  "test_cmd": "python3 -m unittest discover -s tests -q",
+  "test_cmd": "uv run python -m unittest discover -s tests -q",
   "setup_cmd": "",
   "gates": { "approve": "auto", "merge": "auto" },
   "agents": {

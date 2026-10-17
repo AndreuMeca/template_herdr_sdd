@@ -77,7 +77,7 @@ The reviewer walks these and records each in `## Checked`:
 5. Error paths and edge values named in the requirements are handled, not just the happy path.
 6. No debug leftovers, no secrets, no TODOs without an owner, no unrelated reformatting.
 7. Project conventions from `AGENTS.md` §1 are respected.
-8. `python3 harness/harness.py check <slug> --tests` is green on the branch as it stands.
+8. `uv run harness/harness.py check <slug> --tests` is green on the branch as it stands.
 
 An unchecked box means `CHANGES_REQUESTED`.
 
@@ -108,14 +108,14 @@ An unchecked box means `CHANGES_REQUESTED`.
 ## 8. Launcher reference
 
 ```
-python3 harness/harness.py status                       board across every worktree (anyone)
-python3 harness/harness.py start <slug> ["intent"]      worktree + branch + feature folder (orchestrator or human, base branch)
+uv run harness/harness.py status                       board across every worktree (anyone)
+uv run harness/harness.py start <slug> ["intent"]      worktree + branch + feature folder (orchestrator or human, base branch)
                                    --detach             also start a dedicated orchestrator agent in the worktree
-python3 harness/harness.py run <role> <slug> ["msg"]    run a role agent in the feature's worktree (orchestrator, from anywhere)
-python3 harness/harness.py wait <role> <slug>           keep waiting for a running role agent (orchestrator)
-python3 harness/harness.py approve <slug>               approve a spec, notify the orchestrator (human)
-python3 harness/harness.py merge <slug>                 merge, mark done, remove the worktree (human, base branch)
-python3 harness/harness.py check [slug] [--tests]       rules above (everyone, before stopping)
+uv run harness/harness.py run <role> <slug> ["msg"]    run a role agent in the feature's worktree (orchestrator, from anywhere)
+uv run harness/harness.py wait <role> <slug>           keep waiting for a running role agent (orchestrator)
+uv run harness/harness.py approve <slug>               approve a spec, notify the orchestrator (human)
+uv run harness/harness.py merge <slug>                 merge, mark done, remove the worktree (human, base branch)
+uv run harness/harness.py check [slug] [--tests]       rules above (everyone, before stopping)
 ```
 
 `run` and `wait` exit 0 when the role finished (DONE), 3 while it is still working (STILL_WORKING: call

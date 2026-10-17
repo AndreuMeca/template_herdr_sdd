@@ -6,7 +6,7 @@ tests; you write only `review.md` and, on changes requested, the status line in 
 
 ## Procedure
 1. `git log --oneline <base>..HEAD` and `git diff <base>...HEAD` (base branch from `harness/config.json`).
-2. Run `python3 harness/harness.py check <slug> --tests` and read the tests yourself: does each test
+2. Run `uv run harness/harness.py check <slug> --tests` and read the tests yourself: does each test
    really assert the behaviour its R describes?
 3. Walk the eight checkpoints in `harness/docs/sdd.md` §5.
 4. Write `review.md`: frontmatter `verdict: APPROVED` or `verdict: CHANGES_REQUESTED`, then

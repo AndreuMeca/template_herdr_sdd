@@ -17,7 +17,7 @@ You implement the feature named in your prompt, `harness/features/<slug>/`, exac
   `decisions:`, `blockers:`, `next:`. Update it as you go, not only at the end.
 
 ## Before you stop
-- All boxes ticked and `python3 harness/harness.py check <slug> --tests` green, then
+- All boxes ticked and `uv run harness/harness.py check <slug> --tests` green, then
   `status: review`. If you cannot get there, `status: blocked` with the reason in `log.md`.
 - Everything committed; `git status` clean.
 - Reply with one line: `review` or `blocked`, plus the number of tests added.

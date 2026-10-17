@@ -7,7 +7,7 @@ root is the map every agent reads. The rest of the repo is your project.
 
 ## Prerequisites
 - git, and python3 (3.9+) or [uv](https://docs.astral.sh/uv/): the launcher is stdlib only, so
-  `python3 harness/harness.py ...` and `uv run harness/harness.py ...` are equivalent
+  `uv run harness/harness.py ...` and `uv run harness/harness.py ...` are equivalent
 - [herdr](https://herdr.dev/docs/install/) (`curl -fsSL https://herdr.dev/install.sh | sh`)
 - The agent CLIs you name in `harness/config.json` (for example `claude`, `codex`, `pi`), logged in
 
@@ -31,16 +31,16 @@ root is the map every agent reads. The rest of the repo is your project.
 
 ## Daily flow
 You, to the agent you started on `main`: "Build email+password login with a cookie session."
-The agent runs `python3 harness/harness.py start login "..."`, which creates a worktree
+The agent runs `uv run harness/harness.py start login "..."`, which creates a worktree
 (`~/.herdr/worktrees/<repo>/login`), the branch `login`, and `harness/features/login/`. It then runs the
 spec author, implementer and reviewer one after another, each in its own tab of that worktree's
 workspace (labelled with the role), and stops
 at the two human gates:
 ```
-python3 harness/harness.py status          # spec_ready: read harness/features/login/spec.md, then
-python3 harness/harness.py approve login   # ... the agent continues with implementer and reviewer
-python3 harness/harness.py status          # review + APPROVED:
-python3 harness/harness.py merge login
+uv run harness/harness.py status          # spec_ready: read harness/features/login/spec.md, then
+uv run harness/harness.py approve login   # ... the agent continues with implementer and reviewer
+uv run harness/harness.py status          # review + APPROVED:
+uv run harness/harness.py merge login
 ```
 You can type those yourself, tell the agent "approved" / "merge it", or set the gates to `auto` in
 `harness/config.json` so the agent goes from request to merged feature without stopping. Several features can run in
