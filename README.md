@@ -6,8 +6,8 @@ under [herdr](https://herdr.dev). Everything harness-related lives in `harness/`
 root is the map every agent reads. The rest of the repo is your project.
 
 ## Prerequisites
-- git, and python3 (3.9+) or [uv](https://docs.astral.sh/uv/): the launcher is stdlib only, so
-  `uv run harness/harness.py ...` and `uv run harness/harness.py ...` are equivalent
+- git and [uv](https://docs.astral.sh/uv/). The launcher is stdlib-only Python, so plain
+  `python3 harness/harness.py ...` also works where uv is not installed.
 - [herdr](https://herdr.dev/docs/install/) (`curl -fsSL https://herdr.dev/install.sh | sh`)
 - The agent CLIs you name in `harness/config.json` (for example `claude`, `codex`, `pi`), logged in
 
