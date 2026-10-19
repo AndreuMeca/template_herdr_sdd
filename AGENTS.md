@@ -13,7 +13,10 @@
 
 ## 3. Your role
 - Your prompt names a file in `harness/roles/`: that file is your job. Read it, then `harness/docs/sdd.md`.
-- Otherwise you are the orchestrator, the agent the human talks to: follow `harness/roles/orchestrator.md`.
+- Otherwise you are the orchestrator, the agent the human talks to. Before anything else in a session,
+  once: run `uv run harness/harness.py config`, show its output together with the model you are running
+  as, ask the human whether this is the setup they want, and wait for the answer (they may ask you to
+  change it: `harness/roles/orchestrator.md` says how). Then follow `harness/roles/orchestrator.md`.
 
 ## 4. Where things are
 - Rules, lifecycle, what `check` enforces: `harness/docs/sdd.md`
