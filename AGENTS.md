@@ -1,6 +1,6 @@
 # AGENTS.md
 
-<!-- The map, not a rulebook. Keep it short; details live in the files it points to. Fill §1 per project. -->
+<!-- The map, not a rulebook. Fill §1 per project; everything else points to its one source. -->
 
 ## 1. Project
 - What it is: <one paragraph: what this software does and for whom>
@@ -9,35 +9,15 @@
 
 ## 2. Two lanes
 - Trivial change (typo, one-line fix, config tweak): just do it, with a test when behaviour changes.
-- Feature (anything that needs requirements): goes through the harness in `harness/`. Never implement a
-  feature outside it.
+- Feature (anything that needs requirements): through the harness in `harness/`, never outside it.
 
-## 3. If your prompt names a file in `harness/roles/`
-That file is your job description and is authoritative. Read it, then `harness/docs/sdd.md`.
+## 3. Your role
+- Your prompt names a file in `harness/roles/`: that file is your job. Read it, then `harness/docs/sdd.md`.
+- Otherwise you are the orchestrator, the agent the human talks to: follow `harness/roles/orchestrator.md`.
 
-## 4. Building a feature (you, the agent the human is talking to)
-You were started by a human in this repo, inside herdr. When they ask for a feature:
-```
-uv run harness/harness.py start <slug> "what the feature must do"   # worktree + branch + feature folder
-uv run harness/harness.py drive <slug> --tab                        # the driver: runs the roles, stops at the human gates
-```
-then follow `harness/roles/orchestrator.md`. The driver runs the spec author, implementer and reviewer
-one at a time, each in its own tab of the worktree's herdr workspace, and prompts you with a line
-`harness: <slug> ...` when the feature needs a human; `uv run harness/harness.py status` then says what
-(group `needs you`). The human approves with `uv run harness/harness.py approve <slug>` and merges with
-`uv run harness/harness.py merge <slug>`; run those yourself only when the human says so. Gates set to
-`auto` in `harness/config.json` are run by the driver. Several features can be driven at once. Pick the
-slug yourself if the human gives none: short, lowercase, dashes.
-
-## 5. Rules for everyone
-- Commit messages start with the feature slug: `<slug>: <what>`.
-- Never edit another feature's folder or `harness/` outside `harness/features/<slug>/`.
-- Never commit to the base branch; only `approve` and `merge` do.
-- `uv run harness/harness.py check <slug>` must be green before you stop; the launcher checks it too.
-- `uv run harness/harness.py doctor` when something looks off: missing tools, leftover worktrees or workspaces.
-- Inside herdr (`HERDR_ENV=1`), when you need herdr beyond `harness.py`, run `herdr --skill` and follow it.
-
-## 6. Where things are
-- Rules and lifecycle: `harness/docs/sdd.md`
-- Agent CLIs and models per role, gates, test and setup commands, gitignored files copied into worktrees: `harness/config.json` (explained in `harness/help/config.md`)
+## 4. Where things are
+- Rules, lifecycle, what `check` enforces: `harness/docs/sdd.md`
+- Commands: `uv run harness/harness.py --help`
+- Config (agent per role, gates, commands, files copied into worktrees): `harness/config.json`, explained in `harness/help/config.md`
 - Features: `harness/features/<slug>/{spec,tasks,log,review}.md`
+- herdr beyond `harness.py` (inside herdr, `HERDR_ENV=1`): `herdr --skill`

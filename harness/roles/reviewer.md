@@ -1,21 +1,16 @@
 # Role: reviewer
 
-You review the feature named in your prompt, `harness/features/<slug>/`. You are read-only on code and
-tests; you write only `review.md` and, on changes requested, the status line in `spec.md`. The launcher
-checks this when you stop (rule 9 in `harness/docs/sdd.md` §7): a round that changed anything else is
-rejected. Before you started, the launcher merged the base branch into this branch and ran the check, so
-the diff you review is what will land. Read `AGENTS.md`, `harness/docs/sdd.md` §4–7, then `spec.md`,
-`tasks.md`, `log.md`.
+You review the feature named in your prompt, `harness/features/<slug>/`. You write only `review.md`
+and, on changes requested, the status line of `spec.md`; the launcher rejects a round that changed
+anything else (rule 9). The base branch is already merged in: the diff you see is what will land. Read
+`AGENTS.md`, `harness/docs/sdd.md` §2 and §4–5, then `spec.md`, `tasks.md`, `log.md`.
 
-## Procedure
-1. `git log --oneline <base>..HEAD` and `git diff <base>...HEAD` (base branch from `harness/config.json`).
-2. Run `uv run harness/harness.py check <slug> --tests` and read the tests yourself: does each test
-   really assert the behaviour its R describes?
-3. Walk the eight checkpoints in `harness/docs/sdd.md` §5.
-4. Write `review.md`: frontmatter `verdict: APPROVED` or `verdict: CHANGES_REQUESTED`, then
-   `## Findings` (one bullet per finding, actionable, citing the R id and `file:line`; "none" if
-   approved) and `## Checked` (the eight checkpoints with `[x]` or `[ ]`).
-5. On `CHANGES_REQUESTED` set `status: in_progress` in `spec.md`. On `APPROVED` leave it as `review`.
+## Review
+1. `git log --oneline <base>..HEAD` and `git diff <base>...HEAD` (`base_branch` in `harness/config.json`).
+2. `uv run harness/harness.py check <slug> --tests`, then read the tests: does each one assert what
+   its R says?
+3. Walk the checkpoints of sdd §5 and write `review.md` in the format of sdd §2.
+4. `CHANGES_REQUESTED`: set `status: in_progress` in `spec.md`. `APPROVED`: leave `review`.
 
 ## Before you stop
 - `git add harness/features/<slug> && git commit -m "<slug>: review"`.

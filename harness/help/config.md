@@ -1,129 +1,50 @@
 # harness/config.json
 
-The only tool-specific file in the template. JSON cannot hold comments, so this file explains it.
-Unknown keys (like `_help`) are ignored by the launcher.
+The only tool-specific file. JSON cannot hold comments, so this file explains it; the shipped
+`config.json` is the default example (mixed vendors, human gates). Unknown keys such as `_help` are
+ignored. The launcher validates the file on every command and names the problem.
 
 ## Keys
 
 | key | required | values | what it does |
 |---|---|---|---|
-| `base_branch` | yes | a branch name, usually `main` | `start` forks feature branches from it; `merge` merges them back into it. |
-| `test_cmd` | yes | a shell command | Run from the repo (or worktree) root by `check` from status `review` on, and by `merge` on the merged tree. Exit 0 means green. Examples: `uv run pytest -q`, `uv run python -m unittest discover -s tests -q`, `npm test`. |
-| `setup_cmd` | no | a shell command or `""` | Run once by `start` inside the new worktree, before any agent works there. Use it to create the environment: `uv sync`, `npm ci`. Empty means nothing to do. |
-| `copy_files` | no | a list of paths or globs relative to the repo root, default `[]` | Gitignored files and folders that `start` copies from the main checkout into the new worktree, before `setup_cmd`. A worktree only gets what git tracks, so list what the project needs to run and test there: `[".env"]`, `[".env", ".streamlit/secrets.toml", "data/"]`. A `.worktreeinclude` file at the repo root (one path or glob per line, `#` comments) adds to the list, the same file Claude Code reads for its own worktrees. Paths missing in the main checkout and paths that are not gitignored are skipped and named in the output. Copies, not links: agents can edit them without touching yours. Do not list `.venv` or `node_modules`; `setup_cmd` rebuilds them. |
-| `teardown_cmd` | no | a shell command or `""` | Run by `merge` inside the worktree right before it is removed, paired with `setup_cmd`: `docker compose down`, dropping a per-feature database. Empty means nothing to do. |
-| `max_review_rounds` | no | an integer, default `3`; `0` means no limit | After this many reviews ending in `CHANGES_REQUESTED` the launcher sets the feature `blocked` instead of running the implementer again, and the human decides (the findings stay in `review.md`). |
-| `gates.approve` | no | `human` (default) or `auto` | Who approves a spec. `human`: the orchestrator stops after the spec and waits for you to run `approve <slug>` or say "approved". `auto`: the orchestrator judges the spec and runs `approve` itself. |
-| `gates.merge` | no | `human` (default) or `auto` | Who merges. `human`: the orchestrator stops after the reviewer's APPROVED and waits for `merge <slug>`. `auto`: the orchestrator merges itself, unless it is a detached orchestrator inside the worktree (merging would delete its own workspace), in which case it stops and tells you. |
-| `agents.<role>` | yes, for all four roles | an object, see below | Which CLI and model run each role: `orchestrator` (only used by `start --detach`), `spec_author`, `implementer`, `reviewer`. |
+| `base_branch` | yes | branch name | `start` forks from it; `merge` merges back into it. |
+| `test_cmd` | yes | shell command | Run at the worktree root by `check` from status `review` on and by `merge`. Exit 0 = green. `uv run pytest -q`, `npm test`. |
+| `setup_cmd` | no | shell command or `""` | Run once by `start` in the new worktree: `uv sync`, `npm ci`. |
+| `copy_files` | no | paths or globs relative to the repo root, default `[]` | Gitignored files `start` copies from the main checkout into the worktree (a worktree only gets what git tracks): `[".env"]`. A `.worktreeinclude` file at the repo root (one entry per line, `#` comments) adds to the list. Tracked paths are skipped; copies, not links. Not `.venv` or `node_modules`: `setup_cmd` rebuilds them. |
+| `teardown_cmd` | no | shell command or `""` | Run by `merge` in the worktree before removing it: `docker compose down`. |
+| `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
+| `gates.approve`, `gates.merge` | no | `human` (default) or `auto` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. |
+| `agents.<role>` | yes, all four | object, below | Which CLI and model run `orchestrator` (only `start --detach`), `spec_author`, `implementer`, `reviewer`. |
 
 ## `agents.<role>`
 
 | key | required | values | what it does |
 |---|---|---|---|
-| `kind` | yes | a herdr agent kind: `claude`, `codex`, `pi`, `gemini`, `opencode`, `cursor`, `copilot`, `amp`, `droid`, `grok`, `kimi`, `kiro`, `cline`, `qwen`, `hermes`, `kilo`, `letta`, `devin`, `agy`, `omp`, `mastracode`, `qodercli`, `maki`, `muse` (`herdr agent start --help` lists the ones your herdr knows) | The CLI herdr starts for this role. The CLI must be installed and logged in. This is also what picks the provider: `claude` is Anthropic, `codex` is OpenAI, `gemini` is Google; `pi` and `opencode` take the provider inside the model string. |
-| `model` | no | a model id the CLI accepts, or `""` | Passed as `--model <model>` after `--`. Empty means the CLI's default model. |
-| `args` | no | a list of strings | Extra CLI flags, appended verbatim after the model flag. Use it for non-interactive permissions: role agents must not stop at approval dialogs. |
+| `kind` | yes | a herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
+| `model` | no | a model id the CLI accepts, or `""` | Passed as `--model`; empty = the CLI's default. |
+| `args` | no | list of strings | Extra flags, verbatim. Role agents need the non-interactive permission flag or they stop at the first dialog. |
 
-Put the model and flags the CLI itself understands; herdr only passes them through. Check with
-`<cli> --help` when in doubt. The launcher answers Claude Code's two startup dialogs (trust folder,
-bypass-permissions warning) by itself; any other dialog is reported as NEEDS_ATTENTION.
+herdr only passes model and flags through; check `<cli> --help`. The launcher answers Claude Code's
+two startup dialogs (trust folder, bypass-permissions warning) itself; any other dialog is reported.
 
-### Ready-to-copy entries per CLI
-
-Claude Code (`claude --help`): models `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`.
+Ready-to-copy entries:
 ```json
 { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] }
 { "kind": "claude", "model": "claude-opus-5-5",   "args": ["--permission-mode", "acceptEdits"] }
+{ "kind": "codex",  "model": "",                  "args": ["--ask-for-approval", "never", "--sandbox", "workspace-write"] }
+{ "kind": "pi",     "model": "anthropic/claude-sonnet-5-5", "args": [] }
 ```
-`--dangerously-skip-permissions` is what role agents need. `--permission-mode acceptEdits` still asks
-before shell commands, which is fine for a detached orchestrator you watch, not for roles.
-
-Codex (`codex --help`): leave `model` empty for the CLI's default, or set one it lists.
-```json
-{ "kind": "codex", "model": "", "args": ["--ask-for-approval", "never", "--sandbox", "workspace-write"] }
-```
-`--dangerously-bypass-approvals-and-sandbox` removes the sandbox as well; only in a disposable machine.
-
-pi (`pi --help`): the model string carries the provider, `provider/model`, optionally `:thinking`.
-```json
-{ "kind": "pi", "model": "anthropic/claude-sonnet-5-5", "args": [] }
-{ "kind": "pi", "model": "openai/gpt-5",                "args": [] }
-```
-pi runs tools without approval prompts, so no permission flag is needed.
-
-Gemini CLI, opencode and the others: not verified with this template. They accept `--model`; check
-their help for the non-interactive flag (Gemini CLI calls it `--yolo`) and put it in `args`.
-
-## Complete examples
-
-Everything on Claude, fully automatic once you ask for a feature:
-```json
-{
-  "base_branch": "main",
-  "test_cmd": "uv run pytest -q",
-  "setup_cmd": "uv sync",
-  "copy_files": [".env"],
-  "teardown_cmd": "",
-  "max_review_rounds": 3,
-  "gates": { "approve": "auto", "merge": "auto" },
-  "agents": {
-    "orchestrator": { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] },
-    "spec_author":  { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] },
-    "implementer":  { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] },
-    "reviewer":     { "kind": "claude", "model": "claude-opus-5-5",   "args": ["--dangerously-skip-permissions"] }
-  }
-}
-```
-
-Mixed vendors, you approve specs and merges yourself (the shipped default):
-```json
-{
-  "base_branch": "main",
-  "test_cmd": "uv run pytest -q",
-  "setup_cmd": "uv sync",
-  "copy_files": [".env"],
-  "teardown_cmd": "",
-  "max_review_rounds": 3,
-  "gates": { "approve": "human", "merge": "human" },
-  "agents": {
-    "orchestrator": { "kind": "claude", "model": "claude-opus-5-5",   "args": ["--permission-mode", "acceptEdits"] },
-    "spec_author":  { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] },
-    "implementer":  { "kind": "codex",  "model": "",                  "args": ["--ask-for-approval", "never", "--sandbox", "workspace-write"] },
-    "reviewer":     { "kind": "pi",     "model": "anthropic/claude-sonnet-5-5", "args": [] }
-  }
-}
-```
-
-Cheap, for trying the harness out:
-```json
-{
-  "base_branch": "main",
-  "test_cmd": "uv run python -m unittest discover -s tests -q",
-  "setup_cmd": "",
-  "copy_files": [],
-  "teardown_cmd": "",
-  "max_review_rounds": 2,
-  "gates": { "approve": "auto", "merge": "auto" },
-  "agents": {
-    "orchestrator": { "kind": "claude", "model": "claude-haiku-5-5", "args": ["--dangerously-skip-permissions"] },
-    "spec_author":  { "kind": "claude", "model": "claude-haiku-5-5", "args": ["--dangerously-skip-permissions"] },
-    "implementer":  { "kind": "claude", "model": "claude-haiku-5-5", "args": ["--dangerously-skip-permissions"] },
-    "reviewer":     { "kind": "claude", "model": "claude-haiku-5-5", "args": ["--dangerously-skip-permissions"] }
-  }
-}
-```
-
-The launcher validates the file on every command: a missing required key, a role without `kind`, or a
-gate value other than `human`/`auto` stops with a message naming the problem. `uv run harness/harness.py doctor`
-also checks that every role's CLI is installed.
+`--permission-mode acceptEdits` still asks before shell commands: fine for a detached orchestrator you
+watch, not for roles. Codex's `--dangerously-bypass-approvals-and-sandbox` also drops the sandbox; only
+on a disposable machine. pi never asks. Other CLIs are unverified; put their non-interactive flag
+(Gemini CLI: `--yolo`) in `args`.
 
 ## herdr's sidebar
 
 The launcher reports each feature's state (`spec ready · needs you: approve`, `implementer · working`,
-`review approved · needs you: merge`, `blocked · needs you`) as the Space token `$harness` of its
-workspace. herdr shows custom tokens only when the sidebar layout names them, so add once to
-`~/.config/herdr/config.toml` and run `herdr server reload-config`:
+...) as the Space token `$harness` of its workspace. herdr shows custom tokens only when the layout names
+them: add once to `~/.config/herdr/config.toml` and run `herdr server reload-config` (`doctor` reminds you):
 ```toml
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace"], ["branch", "git_status"], ["$harness"]]
