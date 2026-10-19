@@ -92,6 +92,41 @@ def worktrees(root: Path) -> list[tuple[Path, str]]:
     return items
 
 
+def copy_ignored(src: Path, dst: Path, patterns: list[str]) -> str:
+    """Copy the gitignored paths matching `patterns` from the main checkout `src` into the worktree `dst`; one report line."""
+    hits, missing = set(), []
+    for pat in patterns:
+        found = [s.relative_to(src) for s in src.glob(pat)]
+        if not found:
+            missing.append(pat)
+        hits.update(found)
+    done, skipped, failed = set(), [], []
+    for rel in sorted(hits):  # parents sort before their children
+        if any(p in done for p in rel.parents):
+            continue  # inside a folder already copied whole
+        if sh(["git", "check-ignore", "-q", rel], cwd=src, check=False).returncode != 0:
+            skipped.append(str(rel))  # tracked or not ignored: the worktree already has git's version
+            continue
+        s, d = src / rel, dst / rel
+        try:
+            d.parent.mkdir(parents=True, exist_ok=True)
+            if s.is_dir():
+                shutil.copytree(s, d, symlinks=True, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
+            done.add(rel)
+        except OSError as e:
+            failed.append(f"{rel} ({e})")
+    parts = [f"copied {', '.join(str(r) for r in sorted(done))}" if done else "nothing copied"]
+    if missing:
+        parts.append(f"not in the main checkout: {', '.join(missing)}")
+    if skipped:
+        parts.append(f"skipped, not gitignored: {', '.join(skipped)}")
+    if failed:
+        parts.append(f"FAILED: {'; '.join(failed)}")
+    return "; ".join(parts)
+
+
 def load_cfg(root: Path) -> dict:
     p = root / "harness" / "config.json"
     try:
@@ -111,6 +146,9 @@ def load_cfg(root: Path) -> dict:
         gates.setdefault(gate, "human")
         if gates[gate] not in ("human", "auto"):
             die(f"{p}: gates.{gate} must be 'human' or 'auto'")
+    cf = cfg.setdefault("copy_files", [])
+    if not isinstance(cf, list) or not all(isinstance(x, str) and Path(x).parts and not x.startswith("/") and ".." not in Path(x).parts for x in cf):
+        die(f"{p}: copy_files must be a list of paths or globs relative to the repo root")
     return cfg
 
 
@@ -530,6 +568,8 @@ def cmd_start(a):
     git("add", f"harness/features/{a.slug}", cwd=wt)
     git("commit", "-q", "-m", f"{a.slug}: new feature", cwd=wt)
 
+    if cfg["copy_files"]:
+        print("copy_files:", copy_ignored(root, wt, cfg["copy_files"]))
     if cfg.get("setup_cmd"):
         p = subprocess.run(cfg["setup_cmd"], shell=True, cwd=wt, text=True, capture_output=True, stdin=subprocess.DEVNULL)
         print("setup_cmd:", "ok" if p.returncode == 0 else f"FAILED (exit {p.returncode}); fix it in the worktree\n{(p.stdout + p.stderr).strip()[-800:]}")

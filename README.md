@@ -17,7 +17,8 @@ root is the map every agent reads. The rest of the repo is your project.
 2. Edit `AGENTS.md` §1 (what the project is, where code and tests live, how to run tests).
 3. Edit `harness/config.json` (every key and value is explained in `harness/help/config.md`): `test_cmd` and
    optional `setup_cmd` (the defaults assume a uv project:
-   `uv run pytest -q` and `uv sync`), the two `gates` (`approve` and `merge`,
+   `uv run pytest -q` and `uv sync`), `copy_files` (gitignored files such as `.env` that each new
+   worktree needs, copied from the main checkout; a worktree only gets what git tracks), the two `gates` (`approve` and `merge`,
    each `human` to stop and wait for you, the default, or `auto` to let the orchestrator run them), and
    for each role the agent CLI
    (`kind`, one of herdr's agent kinds), the `model`, and extra CLI `args`. Role agents need
@@ -54,7 +55,7 @@ for it when the first worktree is created.
 ```
 AGENTS.md                      the map (read natively by Claude Code, Codex, pi)
 harness/
-  config.json                  agent kind + model per role, gates, test/setup commands (the only tool-specific file)
+  config.json                  agent kind + model per role, gates, test/setup commands, files copied into worktrees (the only tool-specific file)
   help/config.md               what every key in config.json means and which values it accepts
   harness.py                   status | start | run | wait | approve | merge | check
   docs/sdd.md                  all the rules: lifecycle, file formats, EARS, traceability, checkpoints

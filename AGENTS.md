@@ -36,5 +36,5 @@ in every worktree. Pick the slug yourself if the human gives none: short, lowerc
 
 ## 6. Where things are
 - Rules and lifecycle: `harness/docs/sdd.md`
-- Agent CLIs and models per role, gates, test and setup commands: `harness/config.json` (explained in `harness/help/config.md`)
+- Agent CLIs and models per role, gates, test and setup commands, gitignored files copied into worktrees: `harness/config.json` (explained in `harness/help/config.md`)
 - Features: `harness/features/<slug>/{spec,tasks,log,review}.md`

@@ -10,6 +10,7 @@ Unknown keys (like `_help`) are ignored by the launcher.
 | `base_branch` | yes | a branch name, usually `main` | `start` forks feature branches from it; `merge` merges them back into it. |
 | `test_cmd` | yes | a shell command | Run from the repo (or worktree) root by `check` from status `review` on, and by `merge` on the merged tree. Exit 0 means green. Examples: `uv run pytest -q`, `uv run python -m unittest discover -s tests -q`, `npm test`. |
 | `setup_cmd` | no | a shell command or `""` | Run once by `start` inside the new worktree, before any agent works there. Use it to create the environment: `uv sync`, `npm ci`. Empty means nothing to do. |
+| `copy_files` | no | a list of paths or globs relative to the repo root, default `[]` | Gitignored files and folders that `start` copies from the main checkout into the new worktree, before `setup_cmd`. A worktree only gets what git tracks, so list what the project needs to run and test there: `[".env"]`, `[".env", ".streamlit/secrets.toml", "data/"]`. Paths missing in the main checkout and paths that are not gitignored are skipped and named in the output. Copies, not links: agents can edit them without touching yours. Do not list `.venv` or `node_modules`; `setup_cmd` rebuilds them. |
 | `gates.approve` | no | `human` (default) or `auto` | Who approves a spec. `human`: the orchestrator stops after the spec and waits for you to run `approve <slug>` or say "approved". `auto`: the orchestrator judges the spec and runs `approve` itself. |
 | `gates.merge` | no | `human` (default) or `auto` | Who merges. `human`: the orchestrator stops after the reviewer's APPROVED and waits for `merge <slug>`. `auto`: the orchestrator merges itself, unless it is a detached orchestrator inside the worktree (merging would delete its own workspace), in which case it stops and tells you. |
 | `agents.<role>` | yes, for all four roles | an object, see below | Which CLI and model run each role: `orchestrator` (only used by `start --detach`), `spec_author`, `implementer`, `reviewer`. |
@@ -60,6 +61,7 @@ Everything on Claude, fully automatic once you ask for a feature:
   "base_branch": "main",
   "test_cmd": "uv run pytest -q",
   "setup_cmd": "uv sync",
+  "copy_files": [".env"],
   "gates": { "approve": "auto", "merge": "auto" },
   "agents": {
     "orchestrator": { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] },
@@ -76,6 +78,7 @@ Mixed vendors, you approve specs and merges yourself (the shipped default):
   "base_branch": "main",
   "test_cmd": "uv run pytest -q",
   "setup_cmd": "uv sync",
+  "copy_files": [".env"],
   "gates": { "approve": "human", "merge": "human" },
   "agents": {
     "orchestrator": { "kind": "claude", "model": "claude-opus-5-5",   "args": ["--permission-mode", "acceptEdits"] },
@@ -92,6 +95,7 @@ Cheap, for trying the harness out:
   "base_branch": "main",
   "test_cmd": "uv run python -m unittest discover -s tests -q",
   "setup_cmd": "",
+  "copy_files": [],
   "gates": { "approve": "auto", "merge": "auto" },
   "agents": {
     "orchestrator": { "kind": "claude", "model": "claude-haiku-5-5", "args": ["--dangerously-skip-permissions"] },
