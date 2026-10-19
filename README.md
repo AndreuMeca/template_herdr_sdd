@@ -39,6 +39,7 @@ shows in herdr's sidebar once you add one line to its config (`harness/help/conf
 AGENTS.md                      the map (read natively by Claude Code, Codex, pi)
 harness/
   harness.py                   the launcher: --help lists every command
+  selftest.py                  the launcher's own tests: python3 harness/selftest.py (ruff.toml: its lint settings)
   config.json                  agent per role, gates, commands, files copied into worktrees
   help/config.md               every key of config.json
   docs/sdd.md                  the rules: lifecycle, file formats, EARS, traceability, what check enforces
