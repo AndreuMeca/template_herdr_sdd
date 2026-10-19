@@ -23,7 +23,8 @@ per checkout, always.
 | `blocked` | spec_author, implementer, or the launcher | needs a human decision (`## Open questions` or `log.md`) | human answers: `drive <slug> "<answer>" --tab` |
 
 The gates are `approve` and `merge`; `gates` in `harness/config.json` sets each to `human` (the driver
-stops and prompts the orchestrator, the default) or `auto` (the driver runs it). Only `merge` writes to
+stops and prompts the orchestrator; what a missing key means) or `auto` (the driver runs it; the shipped
+config). Only `merge` writes to
 the base branch. The launcher blocks a feature itself after `max_review_rounds` reviews ending in
 `CHANGES_REQUESTED`, or when a check it sent back still fails after three fixes; the reason goes to
 `log.md`.

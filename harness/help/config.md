@@ -1,7 +1,7 @@
 # harness/config.json
 
 The only tool-specific file. JSON cannot hold comments, so this file explains it; the shipped
-`config.json` is the default example (mixed vendors, human gates). Unknown keys such as `_help` are
+`config.json` is the default example (mixed vendors, automatic gates). Unknown keys such as `_help` are
 ignored. The launcher validates the file on every command and names the problem;
 `uv run harness/harness.py config` prints the setup in a few lines, which the orchestrator shows you
 before the first feature of a session. The driver (`drive`) is the launcher itself, not an agent: it
@@ -17,7 +17,7 @@ has no model and no cost.
 | `copy_files` | no | paths or globs relative to the repo root, default `[]` | Gitignored files `start` copies from the main checkout into the worktree (a worktree only gets what git tracks): `[".env"]`. A `.worktreeinclude` file at the repo root (one entry per line, `#` comments) adds to the list. Tracked paths are skipped; copies, not links. Not `.venv` or `node_modules`: `setup_cmd` rebuilds them. |
 | `teardown_cmd` | no | shell command or `""` | Run by `merge` in the worktree before removing it: `docker compose down`. |
 | `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
-| `gates.approve`, `gates.merge` | no | `human` (default) or `auto` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. |
+| `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `auto`. |
 | `agents.<role>` | yes, all four | object, below | Which CLI and model run `orchestrator` (only `start --detach`), `spec_author`, `implementer`, `reviewer`. |
 
 ## `agents.<role>`

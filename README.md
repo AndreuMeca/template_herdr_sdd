@@ -22,17 +22,18 @@ every agent reads; the rest of the repo is your project.
 You, to the agent on `main`: "Build email+password login with a cookie session." It runs `start login`
 (worktree, branch, `harness/features/login/`, nested workspace) and `drive login --tab`, and is free
 again. The driver runs the spec author, implementer and reviewer in their own tabs, merges `main` in and
-tests before every review, sends failures back, and stops at the two human gates, prompting your agent
-with `harness: login ...`:
+tests before every review, sends failures back, and with the shipped config (`gates` set to `auto`)
+approves the spec and merges by itself, telling your agent when it has merged. Set a gate to `human` in
+`harness/config.json` to stop there instead; the driver then prompts your agent with `harness: login ...`:
 ```
 uv run harness/harness.py status          # needs you: spec_ready → read spec.md, then
 uv run harness/harness.py approve login   # the driver continues
 uv run harness/harness.py status          # needs you: review + APPROVED
 uv run harness/harness.py merge login
 ```
-Type those, tell the agent "approved" / "merge it", or set the gates to `auto`. Feedback at a gate:
-`drive login "<feedback>" --tab`. Several features run at once, one driver each. Each feature's state
-shows in herdr's sidebar once you add one line to its config (`harness/help/config.md`).
+Type those, or tell the agent "approved" / "merge it". Feedback at a gate: `drive login "<feedback>" --tab`.
+Several features run at once, one driver each; `merge` is local, so a push is always yours. Each
+feature's state shows in herdr's sidebar once you add one line to its config (`harness/help/config.md`).
 
 ## Layout
 ```

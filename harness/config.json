@@ -3,12 +3,14 @@
   "base_branch": "main",
   "test_cmd": "uv run pytest -q",
   "setup_cmd": "uv sync",
-  "copy_files": [".env"],
+  "copy_files": [
+    ".env"
+  ],
   "teardown_cmd": "",
   "max_review_rounds": 3,
   "gates": {
-    "approve": "human",
-    "merge": "human"
+    "approve": "auto",
+    "merge": "auto"
   },
   "agents": {
     "orchestrator": {
