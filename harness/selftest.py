@@ -720,6 +720,16 @@ class Commands(Case):
         self.assertIn("1 needs you", out)
         self.assertIn("approve (human)", out)
 
+    def test_config_command(self):
+        self.chdir(self.r.wt)  # from a worktree it still shows the main checkout's config
+        self.r.write_cfg(gates={"approve": "auto"}, agents={**AGENTS, "implementer": {"kind": "codex", "args": ["-x"]}})
+        code, out = self.output(h.cmd_config, Namespace())
+        self.assertEqual(code, 0)
+        self.assertIn("gates              approve: auto   merge: human", out)
+        self.assertIn("implementer        codex   (default model)              -x", out)
+        self.assertIn("(only used by start --detach)", out)
+        self.assertIn("copy_files         .env", out)
+
     def test_check_command_finds_the_worktree(self):
         self.chdir(self.r.root)
         code, out = self.output(h.cmd_check, Namespace(slug="feat", tests=False, no_tests=True))

@@ -5,6 +5,7 @@
 # ///
 """SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/run/wait/drive/merge also need herdr.
 
+  harness.py config                        the setup in a few lines: roles, models, gates, commands (anyone)
   harness.py status                        board across every worktree, grouped by whose move it is (anyone)
   harness.py start <slug> ["intent"]       new worktree + branch + feature folder (orchestrator or human, base branch)
                      [--detach]            ... plus a dedicated orchestrator agent in it
@@ -1302,6 +1303,27 @@ class Doctor:
 
 
 # ----------------------------------------------------------------------------- commands
+def cmd_config(a):
+    """The setup the next feature would run with, for the orchestrator to show the human before `start`."""
+    cfg = load_cfg(repo_root())
+    print("harness/config.json")
+    print(f"  base_branch        {cfg.base_branch}")
+    print(f"  test_cmd           {cfg.test_cmd}")
+    print(f"  setup_cmd          {cfg.setup_cmd or '-'}")
+    print(f"  teardown_cmd       {cfg.teardown_cmd or '-'}")
+    print(f"  copy_files         {', '.join(cfg.copy_files) or '-'}")
+    print(f"  max_review_rounds  {cfg.max_review_rounds or 'no limit'}")
+    print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
+    for role in (*ROLES, "orchestrator"):
+        acfg = cfg.agents[role]
+        kind, model, args = acfg["kind"], acfg.get("model") or "(default model)", " ".join(acfg.get("args") or [])
+        missing = "" if shutil.which(kind) else "   <- not in PATH"
+        note = "   (only used by start --detach)" if role == "orchestrator" else ""
+        print(f"  {role:<18} {kind:<7} {model:<28} {args}{missing}{note}")
+    print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
+    return 0
+
+
 def role_working(role: str, slug: str) -> bool:
     return shutil.which("herdr") is not None and agent_state(agent_name(role, slug)) == "working"
 
@@ -1621,6 +1643,9 @@ def main(argv=None) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("config", help="the setup in a few lines: roles, models, gates, commands").set_defaults(
+        fn=cmd_config
+    )
     sub.add_parser("status", help="board across every worktree").set_defaults(fn=cmd_status)
 
     s = sub.add_parser("start", help="new worktree + branch + feature folder (orchestrator or human, base branch)")

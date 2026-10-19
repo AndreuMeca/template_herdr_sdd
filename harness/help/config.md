@@ -2,7 +2,10 @@
 
 The only tool-specific file. JSON cannot hold comments, so this file explains it; the shipped
 `config.json` is the default example (mixed vendors, human gates). Unknown keys such as `_help` are
-ignored. The launcher validates the file on every command and names the problem.
+ignored. The launcher validates the file on every command and names the problem;
+`uv run harness/harness.py config` prints the setup in a few lines, which the orchestrator shows you
+before the first feature of a session. The driver (`drive`) is the launcher itself, not an agent: it
+has no model and no cost.
 
 ## Keys
 

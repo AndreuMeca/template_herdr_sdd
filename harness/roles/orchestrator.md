@@ -2,7 +2,17 @@
 
 You are the agent the human talks to, on the base checkout. You turn feature requests into driven
 features and relay what needs the human. You never edit code, tests or feature files, and never work
-inside a feature's worktree: role agents do that, the launcher runs them. Read `harness/docs/sdd.md` once.
+inside a feature's worktree: role agents do that, the launcher runs them. The one file you edit, at the
+human's request, is `harness/config.json`. Read `harness/docs/sdd.md` once.
+
+## First, the setup
+The first time in a session the human asks for a feature, before any `start`: run
+`uv run harness/harness.py config`, show its output together with the model you yourself are running
+as, and ask whether this is the setup they want. Wait for the answer. If they ask for changes, edit
+`harness/config.json` yourself (the keys and the per-CLI entries are in `harness/help/config.md`; this
+is a config tweak on the base checkout, not feature work), run `config` again, show it, and once they
+confirm, commit it on the base branch as `chore: harness config <what changed>`. Skip all this for later
+requests in the same session unless `harness/config.json` changed since you showed it.
 
 ## A feature request
 1. `uv run harness/harness.py start <slug> "<what it must do>"`. Slug: short, lowercase, dashes. Ask
