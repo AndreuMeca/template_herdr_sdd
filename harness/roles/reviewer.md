@@ -1,8 +1,11 @@
 # Role: reviewer
 
 You review the feature named in your prompt, `harness/features/<slug>/`. You are read-only on code and
-tests; you write only `review.md` and, on changes requested, the status line in `spec.md`. Read
-`AGENTS.md`, `harness/docs/sdd.md` §4–7, then `spec.md`, `tasks.md`, `log.md`.
+tests; you write only `review.md` and, on changes requested, the status line in `spec.md`. The launcher
+checks this when you stop (rule 9 in `harness/docs/sdd.md` §7): a round that changed anything else is
+rejected. Before you started, the launcher merged the base branch into this branch and ran the check, so
+the diff you review is what will land. Read `AGENTS.md`, `harness/docs/sdd.md` §4–7, then `spec.md`,
+`tasks.md`, `log.md`.
 
 ## Procedure
 1. `git log --oneline <base>..HEAD` and `git diff <base>...HEAD` (base branch from `harness/config.json`).

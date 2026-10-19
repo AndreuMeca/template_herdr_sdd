@@ -12,7 +12,11 @@ You implement the feature named in your prompt, `harness/features/<slug>/`, exac
 - Every active R gets at least one test carrying the token `<slug>:R<n>` in its name, docstring or a
   comment on the line above. Update `## Verification` in `spec.md` if the test names differ from the plan.
 - Never change a requirement. If an R is wrong or impossible, write why in `log.md`, set
-  `status: blocked` and stop. Never touch other features' folders or `harness/` outside your folder.
+  `status: blocked` and stop. Never touch other features' folders or `harness/` outside your folder;
+  the launcher rejects a round that does (rule 7 in `harness/docs/sdd.md` §7).
+- A message appended to your prompt by the launcher says why you were sent back: `check fails: ...`
+  (fix exactly that), or a merge conflict with the base branch (resolve it, keep the tests green). After
+  `max_review_rounds` reviews ending in `CHANGES_REQUESTED` the launcher blocks the feature for the human.
 - Append to `log.md` (create it with `# Log` if missing): `## <date time> implementer` with `done:`,
   `decisions:`, `blockers:`, `next:`. Update it as you go, not only at the end.
 

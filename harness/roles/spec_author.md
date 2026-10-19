@@ -1,7 +1,9 @@
 # Role: spec_author
 
 You write the specification for the feature named in your prompt, `harness/features/<slug>/`. You do
-not write code. Read `AGENTS.md`, `harness/docs/sdd.md` §2–4 and §7, then the feature's `spec.md`.
+not write code: until the spec is approved, the launcher rejects any change outside your folder (rule 8
+in `harness/docs/sdd.md` §7). Read `AGENTS.md`, `harness/docs/sdd.md` §2–4 and §7, then the feature's
+`spec.md`.
 
 ## Inputs
 - `## Intent` in `spec.md`, plus any message appended to your prompt (feedback from a previous round).

@@ -8,9 +8,11 @@ this file wins.
 
 One feature = one slug = one folder `harness/features/<slug>/` = one branch = one worktree. The
 orchestrator is the agent the human talks to on the base checkout (or a dedicated agent inside the
-worktree, with `start --detach`). Role agents (spec_author, implementer, reviewer) run one at a time
-inside the feature's worktree, each in a tab of its herdr workspace labelled with the role, so there is
-never more than one writer in a checkout.
+worktree, with `start --detach`). It normally hands the loop to the driver (`drive <slug> --tab`): a
+launcher process in the `driver` tab of the feature's workspace that runs the roles, sends failed checks
+and merge conflicts back, runs the gates that are `auto` and stops when a human is needed. Role agents
+(spec_author, implementer, reviewer) run one at a time inside the feature's worktree, each in a tab of
+its herdr workspace labelled with the role, so there is never more than one writer in a checkout.
 
 | status | set by | means | next |
 |---|---|---|---|
@@ -20,12 +22,15 @@ never more than one writer in a checkout.
 | `in_progress` | implementer at start; reviewer on CHANGES_REQUESTED | code and tests being written | `run implementer` |
 | `review` | implementer | every task ticked, `check --tests` green | `run reviewer`; with verdict `APPROVED` → `merge` |
 | `done` | `merge` (human) | merged into the base branch, worktree removed | — |
-| `blocked` | spec_author or implementer | needs a human decision (`## Open questions` or `log.md`) | human answers; re-run the role with the answer as message |
+| `blocked` | spec_author, implementer, or the launcher | needs a human decision (`## Open questions` or `log.md`) | human answers: `drive <slug> "<answer>" --tab`, or re-run the role with the answer as message |
 
 The only gates are `approve` and `merge`. `gates` in `harness/config.json` sets each one to `human`
-(the orchestrator stops and waits for the human, the default) or `auto` (the orchestrator runs the
-command itself). The board's NEXT column shows which applies. The only command that writes to the base
-branch is `merge`; everything else happens on the feature branch.
+(the driver stops, prompts the orchestrator and waits for the human, the default) or `auto` (the driver
+or the orchestrator runs the command itself). The board's NEXT column shows which applies. The only
+command that writes to the base branch is `merge`; everything else happens on the feature branch.
+
+The launcher blocks a feature itself when `max_review_rounds` reviews ended in `CHANGES_REQUESTED`, or
+when a check the driver sent back still fails after three fixes. The reason is appended to `log.md`.
 
 ## 2. Feature files
 
@@ -88,8 +93,9 @@ An unchecked box means `CHANGES_REQUESTED`.
 - Commit messages start with the slug: `<slug>: <what>`. Role agents commit their own work before they
   stop; a role that stops with uncommitted changes has not finished.
 - Never edit another feature's folder. Never edit `harness/` outside `harness/features/<slug>/`.
-- Do not merge or rebase the base branch into the feature branch unless the human asks (via a `run`
-  message). `merge` does it once, right before merging, and runs the tests on the result.
+- Do not merge or rebase the base branch into the feature branch yourself. The launcher merges it in
+  before every review round (so the reviewer sees what will land) and once more at `merge`, and runs the
+  tests on the result; a conflict goes back to the implementer with a message.
 - Never force-push. Never delete branches or worktrees; `merge` does that.
 
 ## 7. What `check` verifies
@@ -102,22 +108,37 @@ An unchecked box means `CHANGES_REQUESTED`.
 | 4 | every active R has its `<slug>:R<n>` token somewhere outside `harness/` (`git grep --untracked`) | `review` |
 | 5 | every task box is ticked and `log.md` exists | `review` |
 | 6 | `test_cmd` from `harness/config.json` exits 0 | `review`, or `--tests` |
+| 7 | nothing under `harness/` changed outside `harness/features/<slug>/` (branch vs base, plus uncommitted and untracked files) | always, on a feature branch |
+| 8 | nothing changed outside `harness/features/<slug>/` | `pending`, `spec_ready`, `approved` |
+| 9 | since the reviewer started (`refs/harness/<slug>/review-start`, set by `run reviewer`), nothing changed but `review.md` and the status line of `spec.md` | while a verdict is on disk |
 
-`blocked` only triggers rule 1. `merge` additionally requires `verdict: APPROVED`.
+`blocked` triggers rules 1 and 7 only. `merge` additionally requires `verdict: APPROVED`. The launcher
+runs rules 1–5 and 7–9 when a role stops: a role that leaves them red has not finished (the orchestrator
+sees NEEDS_ATTENTION; the driver sends the errors back to the role, three times at most).
 
 ## 8. Launcher reference
 
 ```
-uv run harness/harness.py status                       board across every worktree (anyone)
+uv run harness/harness.py status                       board across every worktree, grouped: needs you / working / done (anyone)
 uv run harness/harness.py start <slug> ["intent"]      worktree + branch + feature folder (orchestrator or human, base branch)
                                    --detach             also start a dedicated orchestrator agent in the worktree
-uv run harness/harness.py run <role> <slug> ["msg"]    run a role agent in the feature's worktree (orchestrator, from anywhere)
+uv run harness/harness.py drive <slug> ["msg"] --tab   run the whole loop in the `driver` tab until a human is needed (orchestrator)
+uv run harness/harness.py run <role> <slug> ["msg"]    run one role agent in the feature's worktree (orchestrator, from anywhere)
 uv run harness/harness.py wait <role> <slug>           keep waiting for a running role agent (orchestrator)
-uv run harness/harness.py approve <slug>               approve a spec, notify the orchestrator (human)
-uv run harness/harness.py merge <slug>                 merge, mark done, remove the worktree (human, base branch)
+uv run harness/harness.py approve <slug>               approve a spec; the driver or detached orchestrator continues (human)
+uv run harness/harness.py merge <slug>                 merge, mark done, run teardown_cmd, remove the worktree (human, base branch)
 uv run harness/harness.py check [slug] [--tests]       rules above (everyone, before stopping)
+uv run harness/harness.py doctor                       tools, config, leftover worktrees/branches/workspaces (anyone)
 ```
 
 `run` and `wait` exit 0 when the role finished (DONE), 3 while it is still working (STILL_WORKING: call
 `wait`), 2 when a human or the orchestrator must look (NEEDS_ATTENTION), 1 on error. "Finished" is
-decided from the files on disk (status, verdict), never from the agent's screen state alone.
+decided from the files on disk (status, verdict) and a green structural check, never from the agent's
+screen state alone.
+
+`drive <slug> "msg"`: the message goes to the first role the driver runs. At a human gate it goes to
+the role that produced what is being judged (feedback on the spec → spec_author; changes before the
+merge → implementer); when blocked, to the implementer if the spec was ever approved, else to the
+spec_author. `--tab` runs the driver in the feature's workspace and returns at once; when it stops, the
+driver prompts the pane it was started from with one line `harness: <slug> ...`. While a driver runs,
+`run` refuses to start a role by hand.

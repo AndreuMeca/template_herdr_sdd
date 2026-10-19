@@ -19,19 +19,22 @@ That file is your job description and is authoritative. Read it, then `harness/d
 You were started by a human in this repo, inside herdr. When they ask for a feature:
 ```
 uv run harness/harness.py start <slug> "what the feature must do"   # worktree + branch + feature folder
+uv run harness/harness.py drive <slug> --tab                        # the driver: runs the roles, stops at the human gates
 ```
-then follow `harness/roles/orchestrator.md` for that slug: it runs the spec author, implementer and
-reviewer one at a time, each in its own tab of the worktree's herdr workspace, and stops at the two human gates. The human approves with
-`uv run harness/harness.py approve <slug>` and merges with `uv run harness/harness.py merge <slug>`;
-run those yourself only when the human says so or when `status` shows the gate as `(auto)` (set by
-`gates` in `harness/config.json`). `uv run harness/harness.py status` shows every feature
-in every worktree. Pick the slug yourself if the human gives none: short, lowercase, dashes.
+then follow `harness/roles/orchestrator.md`. The driver runs the spec author, implementer and reviewer
+one at a time, each in its own tab of the worktree's herdr workspace, and prompts you with a line
+`harness: <slug> ...` when the feature needs a human; `uv run harness/harness.py status` then says what
+(group `needs you`). The human approves with `uv run harness/harness.py approve <slug>` and merges with
+`uv run harness/harness.py merge <slug>`; run those yourself only when the human says so. Gates set to
+`auto` in `harness/config.json` are run by the driver. Several features can be driven at once. Pick the
+slug yourself if the human gives none: short, lowercase, dashes.
 
 ## 5. Rules for everyone
 - Commit messages start with the feature slug: `<slug>: <what>`.
 - Never edit another feature's folder or `harness/` outside `harness/features/<slug>/`.
 - Never commit to the base branch; only `approve` and `merge` do.
-- `uv run harness/harness.py check <slug>` must be green before you stop.
+- `uv run harness/harness.py check <slug>` must be green before you stop; the launcher checks it too.
+- `uv run harness/harness.py doctor` when something looks off: missing tools, leftover worktrees or workspaces.
 - Inside herdr (`HERDR_ENV=1`), when you need herdr beyond `harness.py`, run `herdr --skill` and follow it.
 
 ## 6. Where things are
