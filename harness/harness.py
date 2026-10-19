@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -270,13 +271,28 @@ def find_key(obj, key):
     return None
 
 
+def repo_source(root: Path) -> list:
+    """How to name the repo to `herdr worktree create|open`. The caller's own workspace when it is open on the
+    main checkout, so new worktrees nest under it like the sidebar's "new worktree"; else the path, for which
+    herdr may open a second workspace on the main checkout."""
+    ws = os.environ.get("HERDR_WORKSPACE_ID")
+    if ws:
+        try:
+            src = herdr("worktree", "list", "--workspace", ws).get("source", {})
+        except HerdrError:
+            src = {}
+        if src.get("source_checkout_path") and Path(src["source_checkout_path"]).resolve() == root.resolve():
+            return ["--workspace", ws]
+    return ["--cwd", root]
+
+
 def worktree_workspace(root: Path, wt: Path) -> str:
     """The herdr workspace id of this worktree; opens the workspace if it is closed."""
     wts = herdr("worktree", "list", "--cwd", root).get("worktrees", [])
     ws_id = next((w.get("open_workspace_id") for w in wts if Path(w.get("path", "")).resolve() == wt.resolve()), None)
     if ws_id:
         return ws_id
-    return herdr("worktree", "open", "--cwd", root, "--path", wt, "--no-focus")["workspace"]["workspace_id"]
+    return herdr("worktree", "open", *repo_source(root), "--path", wt, "--no-focus")["workspace"]["workspace_id"]
 
 
 def agent_name(role: str, slug: str) -> str:
@@ -551,7 +567,7 @@ def cmd_start(a):
 
     extra = ["--trust-repository"] if a.trust else []
     try:
-        res = herdr("worktree", "create", "--cwd", root, "--branch", a.slug, "--base", base,
+        res = herdr("worktree", "create", *repo_source(root), "--branch", a.slug, "--base", base,
                     "--label", a.slug, "--no-focus", *extra)
     except HerdrError as e:
         die(f"herdr worktree create -> {e.code}: {e.message}" + ("" if a.trust else "\n(if herdr asks for repository trust, verify the repo and retry with --trust)"))

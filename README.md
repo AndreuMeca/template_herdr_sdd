@@ -48,8 +48,9 @@ You can type those yourself, tell the agent "approved" / "merge it", or set the 
 parallel, each in its own worktree. `start --detach` instead starts a dedicated orchestrator agent inside
 the worktree (in a tab labelled `orchestrator`), for work you want to leave running on its own; talk to
 it by focusing its tab or
-`herdr agent prompt <slug> "..."`. If the repo itself is not open in herdr yet, herdr opens a workspace
-for it when the first worktree is created.
+`herdr agent prompt <slug> "..."`. Each feature's workspace nests under the workspace you asked from,
+as with the sidebar's "new worktree". If `start` runs outside herdr, or from a workspace that is not on
+the main checkout, herdr finds or opens a workspace for the repo instead.
 
 ## Layout
 ```
