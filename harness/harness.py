@@ -1302,6 +1302,10 @@ class Doctor:
 
 
 # ----------------------------------------------------------------------------- commands
+def role_working(role: str, slug: str) -> bool:
+    return shutil.which("herdr") is not None and agent_state(agent_name(role, slug)) == "working"
+
+
 def cmd_status(a):
     root = repo_root()
     gates = load_cfg(root).gates
@@ -1310,7 +1314,7 @@ def cmd_status(a):
         print('no features yet. start one: harness.py start <slug> "intent"')
         return 0
     home = str(Path.home())
-    groups: dict[str, list[tuple]] = {"needs you": [], "working": [], "done": []}
+    groups: dict[str, list[tuple]] = {"needs you": [], "to run": [], "working": [], "done": []}
     for slug, f in sorted(feats.items()):
         nxt = next_action(f.status, f.verdict, gates)
         where = f"{f.branch or '(detached)'}@{str(f.wt).replace(home, '~', 1)}"
@@ -1318,10 +1322,12 @@ def cmd_status(a):
             group = "done"
         elif needs_human(nxt):
             group = "needs you"
+        elif f.live and driver_running(f.wt):
+            group, nxt = "working", nxt + "  (driver running)"
+        elif f.live and nxt.startswith("run ") and role_working(nxt[4:], slug):
+            group, nxt = "working", nxt + "  (agent working)"
         else:
-            group = "working"
-            if f.live and driver_running(f.wt):
-                nxt += "  (driver running)"
+            group = "to run"  # nothing runs on its own: the orchestrator starts the driver or the role
         groups[group].append((slug, f.status or "?", f.verdict or "-", where, nxt))
     print(" · ".join(f"{len(v)} {k}" for k, v in groups.items() if v))
     header = ("SLUG", "STATUS", "VERDICT", "BRANCH@PATH", "NEXT")
@@ -1505,7 +1511,11 @@ def cmd_approve(a):
         die("fix the spec before approving")
     approve_spec(f.wt, a.slug, f.branch)
     sidebar(f.wt, state_text("approved", "", cfg.gates))
-    return resume(root, f.wt, a.slug, "Spec approved. Continue.")
+    text = (
+        f"Spec approved. Continue: run `harness.py drive {a.slug} --tab` (or `run implementer {a.slug}`) now; "
+        "nothing runs on its own."
+    )
+    return resume(root, f.wt, a.slug, text)
 
 
 def cmd_drive(a):
