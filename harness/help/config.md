@@ -26,6 +26,7 @@ has no model and no cost.
 |---|---|---|---|
 | `kind` | yes | a herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
 | `model` | no | a model id the CLI accepts, or `""` | Passed as `--model`; empty = the CLI's default. |
+| `effort` | no | `claude`: `low`, `medium`, `high`, `xhigh`, `max`. `codex`: `minimal`, `low`, `medium`, `high`, `xhigh`. Or `""` | The reasoning effort, translated per CLI (`--effort` for Claude Code, `-c model_reasoning_effort=` for Codex). Empty = the CLI's default. Ignored for other CLIs; `config` says so. |
 | `args` | no | list of strings | Extra flags, verbatim. Role agents need the non-interactive permission flag or they stop at the first dialog. |
 
 herdr only passes model and flags through; check `<cli> --help`. The launcher answers Claude Code's

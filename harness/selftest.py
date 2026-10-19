@@ -201,6 +201,12 @@ class PureFunctions(unittest.TestCase):
             self.assertFalse(h.valid_pattern(bad), bad)
         self.assertEqual(h.agent_cli_args({"kind": "claude"}), [])
         self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}), ["--", "--model", "m", "-x"])
+        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}), ["--", "--effort", "xhigh"])
+        self.assertEqual(
+            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}),
+            ["--", "--model", "g", "-c", "model_reasoning_effort=high", "-y"],
+        )
+        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}), [], "no effort setting for pi")
         self.assertEqual(
             h.role_prompt("reviewer", "s", " a\n b "),
             "Read harness/roles/reviewer.md and follow it for harness/features/s/. a b",
@@ -229,6 +235,21 @@ class ConfigTests(Case):
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "max_review_rounds": -1},
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "max_review_rounds": True},
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "teardown_cmd": 1},
+            {
+                "base_branch": "main",
+                "test_cmd": "true",
+                "agents": {**AGENTS, "reviewer": {"kind": "claude", "effort": "turbo"}},
+            },
+            {
+                "base_branch": "main",
+                "test_cmd": "true",
+                "agents": {**AGENTS, "reviewer": {"kind": "codex", "effort": "max"}},
+            },
+            {
+                "base_branch": "main",
+                "test_cmd": "true",
+                "agents": {**AGENTS, "reviewer": {"kind": "claude", "effort": 3}},
+            },
         ]
         for raw in bad:
             (self.r.root / "harness" / "config.json").write_text(json.dumps(raw))
@@ -722,11 +743,17 @@ class Commands(Case):
 
     def test_config_command(self):
         self.chdir(self.r.wt)  # from a worktree it still shows the main checkout's config
-        self.r.write_cfg(gates={"approve": "auto"}, agents={**AGENTS, "implementer": {"kind": "codex", "args": ["-x"]}})
+        agents = {
+            **AGENTS,
+            "implementer": {"kind": "codex", "effort": "xhigh", "args": ["-x"]},
+            "reviewer": {"kind": "pi", "effort": "high"},
+        }
+        self.r.write_cfg(gates={"approve": "auto"}, agents=agents)
         code, out = self.output(h.cmd_config, Namespace())
         self.assertEqual(code, 0)
         self.assertIn("gates              approve: auto   merge: human", out)
-        self.assertIn("implementer        codex   (default model)              -x", out)
+        self.assertIn("implementer        codex   (default model)              effort xhigh   -x", out)
+        self.assertIn("effort high (ignored: no effort setting for this CLI)", out)
         self.assertIn("(only used by start --detach)", out)
         self.assertIn("copy_files         .env", out)
 

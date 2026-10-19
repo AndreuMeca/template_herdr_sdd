@@ -182,14 +182,26 @@ class Config:
     agents: dict  # role -> {"kind", "model", "args"}
 
 
+def validate_agents(agents: dict, p: Path):
+    """Every role has a CLI kind; an effort, when given, is one its CLI accepts."""
+    for role in ("orchestrator", *ROLES):
+        acfg = agents.get(role)
+        if not isinstance(acfg, dict) or not acfg.get("kind"):
+            die(f"{p}: agents.{role}.kind is required")
+        effort = acfg.get("effort", "")
+        if not isinstance(effort, str):
+            die(f"{p}: agents.{role}.effort must be a string")
+        levels = EFFORTS.get(acfg["kind"], (None, ()))[1]
+        if effort and levels and effort not in levels:
+            die(f"{p}: agents.{role}.effort '{effort}' is not one of {', '.join(levels)} for {acfg['kind']}")
+
+
 def validate_cfg(raw: dict, p: Path) -> dict:
     """The gates of a config file after checking every key; dies naming the first problem."""
     for key in ("base_branch", "test_cmd", "agents"):
         if key not in raw:
             die(f"{p}: missing '{key}'")
-    for role in ("orchestrator", *ROLES):
-        if not isinstance(raw["agents"].get(role), dict) or not raw["agents"][role].get("kind"):
-            die(f"{p}: agents.{role}.kind is required")
+    validate_agents(raw["agents"], p)
     gates = {gate: (raw.get("gates") or {}).get(gate, "human") for gate in ("approve", "merge")}
     for gate, who in gates.items():
         if who not in ("human", "auto"):
@@ -627,10 +639,24 @@ def agent_name(role: str, slug: str) -> str:
     return f"{ROLES[role]}-{slug}"
 
 
+EFFORTS = {  # how each CLI takes a reasoning effort, and the levels it accepts
+    "claude": (("--effort", "{}"), ("low", "medium", "high", "xhigh", "max")),
+    "codex": (("-c", "model_reasoning_effort={}"), ("minimal", "low", "medium", "high", "xhigh")),
+}
+
+
+def effort_args(kind: str, effort: str) -> list:
+    """The CLI flags for `effort`, empty when the CLI has no such setting (`config` says so)."""
+    if not effort or kind not in EFFORTS:
+        return []
+    return [part.format(effort) for part in EFFORTS[kind][0]]
+
+
 def agent_cli_args(a: dict) -> list:
     model = ["--model", a["model"]] if a.get("model") else []
+    effort = effort_args(a.get("kind", ""), a.get("effort", ""))
     extra = list(a.get("args") or [])
-    return ["--", *model, *extra] if (model or extra) else []
+    return ["--", *model, *effort, *extra] if (model or effort or extra) else []
 
 
 def agent_state(name: str) -> str:
@@ -1317,9 +1343,12 @@ def cmd_config(a):
     for role in (*ROLES, "orchestrator"):
         acfg = cfg.agents[role]
         kind, model, args = acfg["kind"], acfg.get("model") or "(default model)", " ".join(acfg.get("args") or [])
+        effort = acfg.get("effort") or "-"
+        if acfg.get("effort") and kind not in EFFORTS:
+            effort += " (ignored: no effort setting for this CLI)"
         missing = "" if shutil.which(kind) else "   <- not in PATH"
         note = "   (only used by start --detach)" if role == "orchestrator" else ""
-        print(f"  {role:<18} {kind:<7} {model:<28} {args}{missing}{note}")
+        print(f"  {role:<18} {kind:<7} {model:<28} effort {effort:<7} {args}{missing}{note}")
     print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
     return 0
 

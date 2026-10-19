@@ -14,6 +14,7 @@
     "orchestrator": {
       "kind": "claude",
       "model": "claude-opus-5-5",
+      "effort": "medium",
       "args": [
         "--dangerously-skip-permissions"
       ]
@@ -21,6 +22,7 @@
     "spec_author": {
       "kind": "claude",
       "model": "claude-fable-5-1",
+      "effort": "xhigh",
       "args": [
         "--dangerously-skip-permissions"
       ]
@@ -28,6 +30,7 @@
     "implementer": {
       "kind": "claude",
       "model": "claude-opus-5-5",
+      "effort": "high",
       "args": [
         "--dangerously-skip-permissions"
       ]
@@ -35,6 +38,7 @@
     "reviewer": {
       "kind": "codex",
       "model": "gpt-6-astra",
+      "effort": "xhigh",
       "args": [
         "--dangerously-bypass-approvals-and-sandbox"
       ]
