@@ -111,9 +111,10 @@ An unchecked box means `CHANGES_REQUESTED`.
 | 7 | nothing under `harness/` changed outside `harness/features/<slug>/` (branch vs base, plus uncommitted and untracked files) | always, on a feature branch |
 | 8 | nothing changed outside `harness/features/<slug>/` | `pending`, `spec_ready`, `approved` |
 | 9 | since the reviewer started (`refs/harness/<slug>/review-start`, set by `run reviewer`), nothing changed but `review.md` and the status line of `spec.md` | while a verdict is on disk |
+| 10 | an `APPROVED` verdict exists only if the launcher started a reviewer round (the ref above); a verdict the implementer wrote is discarded when it stops | `review` |
 
 `blocked` triggers rules 1 and 7 only. `merge` additionally requires `verdict: APPROVED`. The launcher
-runs rules 1–5 and 7–9 when a role stops: a role that leaves them red has not finished (the orchestrator
+runs rules 1–5 and 7–10 when a role stops: a role that leaves them red has not finished (the orchestrator
 sees NEEDS_ATTENTION; the driver sends the errors back to the role, three times at most).
 
 ## 8. Launcher reference

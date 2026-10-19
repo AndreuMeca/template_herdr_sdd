@@ -568,6 +568,9 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: dict
     elif not DONE_WHEN[role](st, vd):
         result, note = "NEEDS_ATTENTION", f"status {st or '?'} / verdict {vd or '-'} is not what {role} must leave"
     else:
+        if role == "implementer" and vd == "APPROVED" and not ref_exists(REVIEW_REF.format(slug=slug), wt):
+            drop_review(wt, slug)  # a verdict only the reviewer may write; the reviewer runs next
+            note, vd = "discarded a verdict the implementer wrote", ""
         errs = check_feature(wt, slug, cfg["base_branch"])
         if errs:
             result, note = "NEEDS_ATTENTION", "check fails"
@@ -651,6 +654,8 @@ def scope_errors(wt: Path, slug: str, st: str, vd: str, base: str) -> list[str]:
                     errs.append(f"{slug}: the reviewer changed more than the status line in spec.md")
             elif p != mine + "review.md":
                 errs.append(f"{slug}: the reviewer changed {p} (only review.md and the status line of spec.md are allowed)")
+    if st == "review" and vd == "APPROVED" and not ref_exists(ref, wt):  # rule 10
+        errs.append(f"{slug}: review.md says APPROVED but the launcher never started a reviewer round; run the reviewer")
     return errs
 
 
