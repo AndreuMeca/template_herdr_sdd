@@ -177,7 +177,8 @@ def copy_ignored(src: Path, dst: Path, patterns: list[str]) -> str:
 
 
 def load_cfg(root: Path) -> dict:
-    p = root / "harness" / "config.json"
+    """The main checkout's config, wherever `root` is: a feature branch cannot change the commands it is checked with."""
+    p = main_checkout(root) / "harness" / "config.json"
     try:
         cfg = json.loads(p.read_text())
     except FileNotFoundError:
@@ -304,9 +305,18 @@ def state_text(st: str, vd: str, gates: dict, running: str = "") -> str:
     return "done" if st == "done" else f"{st or '?'} · fix status"
 
 
+def approve_commits(wt: Path, slug: str, base: str) -> list[str]:
+    """The commits `approve` made on this branch, newest first."""
+    return git("log", "--format=%H", "--grep", f"^{slug}: spec approved$", f"{base}..HEAD", cwd=wt, check=False).splitlines()
+
+
 def approved_once(wt: Path, slug: str, base: str) -> bool:
-    """Whether `approve` ever ran on this branch (the commit it makes)."""
-    return f"{slug}: spec approved" in git("log", "--format=%s", f"{base}..HEAD", cwd=wt, check=False).splitlines()
+    return bool(approve_commits(wt, slug, base))
+
+
+def requirement_lines(spec_text: str) -> list[str]:
+    text = re.sub(r"<!--.*?-->", "", spec_text, flags=re.S)
+    return [l.strip() for l in section(text, "Requirements") if REQ_RE.match(l.strip())]
 
 
 def review_rounds(wt: Path, slug: str, base: str) -> int:
@@ -460,6 +470,7 @@ def launch_driver(root: Path, wt: Path, slug: str, msg: str, notify_pane: str) -
         tab = herdr("tab", "create", "--workspace", ws_id, "--cwd", wt, "--label", "driver", "--no-focus")
         pane = find_key(tab.get("root_pane", tab), "pane_id") or die(f"tab create returned no pane_id: {tab}")
         time.sleep(1.5)  # the new pane's shell needs a moment to reach its prompt
+    msg = " ".join(msg.split())  # one line: the command is typed into the tab's shell
     cmd = [sys.executable, str(Path(__file__).resolve()), "drive", slug, *([msg] if msg else []),
            *(["--notify", notify_pane] if notify_pane else [])]
     herdr("pane", "run", pane, shlex.join(cmd))
@@ -571,7 +582,10 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: dict
         if role == "implementer" and vd == "APPROVED" and not ref_exists(REVIEW_REF.format(slug=slug), wt):
             drop_review(wt, slug)  # a verdict only the reviewer may write; the reviewer runs next
             note, vd = "discarded a verdict the implementer wrote", ""
-        errs = check_feature(wt, slug, cfg["base_branch"])
+        left = [p for _, p in porcelain(wt)]
+        if left:  # docs/sdd.md §6: a role that stops with uncommitted changes has not finished
+            errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}" + (" ..." if len(left) > 8 else "") + "; commit them")
+        errs += check_feature(wt, slug, cfg["base_branch"])
         if errs:
             result, note = "NEEDS_ATTENTION", "check fails"
         else:
@@ -656,6 +670,12 @@ def scope_errors(wt: Path, slug: str, st: str, vd: str, base: str) -> list[str]:
                 errs.append(f"{slug}: the reviewer changed {p} (only review.md and the status line of spec.md are allowed)")
     if st == "review" and vd == "APPROVED" and not ref_exists(ref, wt):  # rule 10
         errs.append(f"{slug}: review.md says APPROVED but the launcher never started a reviewer round; run the reviewer")
+    if st in ("approved", "in_progress", "review"):  # rule 11: the approved requirements are the contract
+        approved = approve_commits(wt, slug, base)
+        if approved:
+            then = requirement_lines(git("show", f"{approved[0]}:{mine}spec.md", cwd=wt, check=False))
+            if then != requirement_lines((wt / mine / "spec.md").read_text()):
+                errs.append(f"{slug}: ## Requirements differs from the approved spec; never change a requirement after approval (ask for a new spec round instead)")
     return errs
 
 
@@ -913,6 +933,9 @@ def preflight(cfg: dict, wt: Path, role: str, slug: str, st: str, vd: str, tests
         return f"cannot run {role} while status is '{st or '(none)'}' (allowed: {', '.join(sorted(RUN_GATE[role]))}); next: {next_action(st, vd, cfg['gates'])}"
     if git("status", "--porcelain", cwd=wt):
         return f"worktree {wt} has uncommitted changes; a role agent must not start on top of them"
+    name = agent_name(role, slug)
+    if agent_state(name) == "working":
+        return f"{name} is still working; wait for it: harness.py wait {role} {slug}"
     ref = REVIEW_REF.format(slug=slug)
     if role == "reviewer":
         ok, moved = sync_base(wt, base)
@@ -975,6 +998,9 @@ def approve_spec(wt: Path, slug: str, branch: str):
 
 def resume(root: Path, wt: Path, slug: str, text: str) -> int:
     """After a human gate: wake the detached orchestrator, else relaunch the driver in its tab, else say what to run."""
+    if shutil.which("herdr") is None:
+        print(f"next (inside herdr): harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
+        return 0
     try:
         herdr("agent", "prompt", slug, text)
         print(f"detached orchestrator '{slug}' notified")
@@ -1027,6 +1053,9 @@ def cmd_merge(a):
     wt = f["wt"]
     if git("status", "--porcelain", cwd=wt):
         die(f"worktree {wt} has uncommitted changes; ask the orchestrator to commit them")
+    pid = driver_running(wt)
+    if pid:
+        die(f"a driver (pid {pid}) is still running {a.slug}; wait until status shows 'merge (human)'")
 
     ok, _ = sync_base(wt, base)
     if not ok:
@@ -1050,8 +1079,7 @@ def cmd_merge(a):
     sh(["git", "update-ref", "-d", REVIEW_REF.format(slug=a.slug)], cwd=root, check=False)
     removed = False
     try:
-        wts = herdr("worktree", "list", "--cwd", root).get("worktrees", [])
-        ws_id = next((w.get("open_workspace_id") for w in wts if Path(w.get("path", "")).resolve() == wt.resolve()), None)
+        ws_id = workspace_of(wt) if shutil.which("herdr") else None
         if ws_id:
             herdr("worktree", "remove", "--workspace", ws_id, "--force")
             removed = True
@@ -1128,6 +1156,7 @@ def drive(root: Path, cfg: dict, f: dict, slug: str, msg: str, notify_pane: str)
             elif nxt == "merge (auto)":
                 main = main_checkout(wt)
                 log = main / ".git" / f"harness-merge-{slug}.log"
+                lock.unlink()  # `merge` refuses while a driver runs; this one is done
                 with log.open("w") as fh:  # detached: `merge` removes this worktree, its workspace and this very pane
                     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "merge", slug], cwd=main,
                                      stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
@@ -1161,11 +1190,18 @@ def drive(root: Path, cfg: dict, f: dict, slug: str, msg: str, notify_pane: str)
                         if fails > FIX_TRIES:
                             block_feature(wt, slug, f"check --tests still fails after {FIX_TRIES} fixes; last output in the driver tab")
                             return stop(f"blocked, needs you: check keeps failing after {FIX_TRIES} fixes", EXIT_ATTENTION)
+            name = agent_name(role, slug)
+            if agent_state(name) == "working":  # left working by an earlier driver or a human: let it finish first
+                print(stamp(), f"{name} is still working; waiting")
+                settled = False
+                while not settled:
+                    settled, _ = wait_agent(name, DRIVE_WAIT_MS)
+                msg = text
+                continue
             st, vd = feature_state(fdir)
             err = preflight(cfg, wt, role, slug, st, vd)
             if err:
                 return stop(f"cannot run {role}: {err}", EXIT_ERROR)
-            name = agent_name(role, slug)
             print(stamp(), f"run {role}" + (f": {' '.join(text.split())[:120]}" if text else ""))
             sidebar(wt, state_text(st, vd, gates, running=role))
             settled, note = prompt_or_start(root, wt, role, slug, role_prompt(role, slug, text), DRIVE_WAIT_MS, cfg["agents"][role])
