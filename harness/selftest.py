@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import types
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -125,20 +127,148 @@ def no_herdr(*args):
     raise AssertionError(f"herdr must not be called in tests: {args}")
 
 
+# A stand-in `herdr` binary for the adapter tests: answers from a JSON state file, logs every argv it gets, and
+# behaves like the real CLI at the boundary the launcher relies on (JSON result on stdout, JSON error on stderr).
+FAKE_HERDR = r"""#!/usr/bin/env python3
+import json, os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_HERDR_LOG"], "a") as fh:
+    fh.write(json.dumps(args) + "\n")
+state_path = os.environ["FAKE_HERDR_STATE"]
+state = json.load(open(state_path))
+agents = state.setdefault("agents", {})
+
+
+def save():
+    json.dump(state, open(state_path, "w"))
+
+
+def ok(result):
+    print(json.dumps({"id": "fake", "result": result}))
+    sys.exit(0)
+
+
+def err(code):
+    sys.stderr.write(json.dumps({"error": {"code": code, "message": "fake " + code}}) + "\n")
+    sys.exit(1)
+
+
+def opt(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+cmd = " ".join(args[:2])
+if cmd == "agent get":
+    a = agents.get(args[2])
+    ok({"agent": {"agent_status": a["status"]}}) if a else err("agent_not_found")
+elif cmd == "agent start":
+    agents[args[2]] = {"status": state.get("start_status", "idle"), "pane": opt("--pane")}
+    save()
+    ok({"agent": {"pane_id": opt("--pane")}})
+elif cmd == "agent prompt":
+    a = agents.get(args[2])
+    if not a:
+        err("agent_not_found")
+    if state.get("prompt_error"):
+        err(state["prompt_error"])
+    a["status"] = state.get("after_prompt", "idle")
+    save()
+    ok({"agent": {"agent_status": a["status"]}})
+elif cmd == "agent wait":
+    if args[2] not in agents:
+        err("agent_not_found")
+    if state.get("wait_error"):
+        err(state["wait_error"])
+    ok({"agent": {"agent_status": "idle"}})
+elif cmd == "agent read":
+    print(state.get("screen", ""))
+elif cmd == "agent send-keys":
+    a = agents.get(args[2])
+    if a and args[3] == "enter":  # the dialog was answered
+        a["status"] = "idle"
+        save()
+    ok({"type": "ok"})
+elif cmd == "tab create":
+    ok({"tab": {"tab_id": "w1:t2"}, "root_pane": {"pane_id": "w1:p2"}})
+elif cmd == "tab list":
+    ok({"tabs": state.get("tabs", [])})
+elif cmd == "pane list":
+    ok({"panes": state.get("panes", [])})
+elif cmd == "worktree list":
+    ok({"source": state.get("source", {}), "worktrees": state.get("worktrees", [])})
+elif cmd == "worktree create":
+    ok({"worktree": {"path": state["new_worktree"]}, "workspace": {"workspace_id": "w9"},
+        "tab": {"tab_id": "w9:t1"}, "root_pane": {"pane_id": "w9:p1"}})
+elif cmd == "worktree open":
+    ok({"workspace": {"workspace_id": "w9"}})
+elif cmd == "worktree remove":
+    wt = next((w["path"] for w in state.get("worktrees", []) if w.get("open_workspace_id") == opt("--workspace")), None)
+    if wt:
+        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=state["repo"], check=False)
+    ok({"type": "worktree_removed"})
+elif cmd == "workspace list":
+    ok({"workspaces": state.get("workspaces", [])})
+else:
+    ok({"type": "ok"})
+"""
+
+
 class Case(unittest.TestCase):
     repo_kwargs: dict = {}
+    fake_herdr = False  # True: a stand-in `herdr` on PATH instead of stubbed launcher functions
 
     def setUp(self):
         self.r = Repo(**self.repo_kwargs)
         self.addCleanup(self.r.close)
-        self.stub("herdr", no_herdr)
-        self.stub("agent_state", lambda name: "idle")
-        self.stub("sidebar", lambda *a, **k: None)
+        if self.fake_herdr:
+            self.install_fake_herdr()
+        else:
+            self.stub("herdr", no_herdr)
+            self.stub("agent_state", lambda name: "idle")
+            self.stub("sidebar", lambda *a, **k: None)
 
     def stub(self, name, value):
         orig = getattr(h, name)
         setattr(h, name, value)
         self.addCleanup(setattr, h, name, orig)
+
+    def setenv(self, name, value):
+        old = os.environ.get(name)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+        self.addCleanup(lambda: os.environ.__setitem__(name, old) if old is not None else os.environ.pop(name, None))
+
+    def install_fake_herdr(self):
+        bindir = self.r.tmp / "bin"
+        bindir.mkdir()
+        exe = bindir / "herdr"
+        exe.write_text(FAKE_HERDR)
+        exe.chmod(0o755)
+        self.state_path = self.r.tmp / "herdr-state.json"
+        self.log_path = self.r.tmp / "herdr-log.jsonl"
+        self.log_path.write_text("")
+        self.state = {
+            "repo": str(self.r.root),
+            "new_worktree": str(self.r.tmp / "new-wt"),
+            "worktrees": [{"path": str(self.r.wt), "branch": "feat", "open_workspace_id": "w1"}],
+            "source": {"source_checkout_path": str(self.r.root), "source_workspace_id": "w0"},
+        }
+        self.save_state()
+        self.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        self.setenv("FAKE_HERDR_STATE", str(self.state_path))
+        self.setenv("FAKE_HERDR_LOG", str(self.log_path))
+        self.setenv("HERDR_WORKSPACE_ID", None)
+        self.stub("time", types.SimpleNamespace(sleep=lambda s: None, time=time.time))  # no real waits
+
+    def save_state(self):
+        self.state_path.write_text(json.dumps(self.state))
+
+    def calls(self, *prefix) -> list:
+        """Every argv the fake herdr received that starts with `prefix`."""
+        lines = [json.loads(line) for line in self.log_path.read_text().splitlines()]
+        return [args for args in lines if args[: len(prefix)] == list(prefix)]
 
     def chdir(self, path):
         cwd = os.getcwd()
@@ -215,6 +345,48 @@ class PureFunctions(unittest.TestCase):
 
 # ----------------------------------------------------------------------------- config and worktree files
 class ConfigTests(Case):
+    def test_claude_settings_from_the_orchestrator_entry(self):
+        self.assertEqual(h.claude_settings({"kind": "claude"}), {"permissions": {"defaultMode": "default"}})
+        self.assertEqual(
+            h.claude_settings({"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}),
+            {"permissions": {"defaultMode": "bypassPermissions"}, "model": "m"},
+        )
+        self.assertEqual(
+            h.claude_settings({"kind": "claude", "args": ["--permission-mode", "plan"]})["permissions"],
+            {"defaultMode": "plan"},
+        )
+        self.assertEqual(
+            h.claude_settings({"kind": "claude", "args": ["--permission-mode"]})["permissions"],
+            {"defaultMode": "default"},
+        )
+
+    def test_write_local_settings(self):
+        p = self.r.root / ".claude" / "settings.local.json"
+        p.parent.mkdir()
+        p.write_text(json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}, "theme": "dark"}))
+        self.r.write_cfg(
+            agents={
+                **AGENTS,
+                "orchestrator": {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]},
+            }
+        )
+        line = h.write_local_settings(self.r.root, self.r.cfg())
+        self.assertIn("model m, permissions bypassPermissions", line)
+        self.assertIn("updated; restart", line)
+        written = json.loads(p.read_text())
+        self.assertEqual(
+            written,
+            {
+                "permissions": {"allow": ["Bash(ls:*)"], "defaultMode": "bypassPermissions"},
+                "theme": "dark",
+                "model": "m",
+            },
+        )
+        self.assertIn("unchanged", h.write_local_settings(self.r.root, self.r.cfg()))
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "codex"}})
+        self.assertIn("left alone", h.write_local_settings(self.r.root, self.r.cfg()))
+        self.assertEqual(json.loads(p.read_text())["model"], "m")
+
     def test_defaults_and_main_checkout(self):
         cfg = self.r.cfg()
         self.assertEqual(
@@ -810,6 +982,186 @@ class Commands(Case):
         self.assertFalse(self.r.wt.exists())
         self.assertNotIn("feat", self.r.git("branch", "--format=%(refname:short)"))
         self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.root))
+
+
+# ----------------------------------------------------------------------------- the herdr adapter, through a fake herdr
+class HerdrAdapter(Case):
+    fake_herdr = True
+    ACFG = {"kind": "claude", "model": "m", "effort": "high", "args": ["--dangerously-skip-permissions"]}
+
+    def test_prompt_or_start_starts_the_agent_in_its_own_tab(self):
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, self.ACFG)
+        self.assertEqual((settled, note), (True, ""))
+        self.assertEqual(
+            self.calls("tab", "create"),
+            [["tab", "create", "--workspace", "w1", "--cwd", str(self.r.wt), "--label", "implementer", "--no-focus"]],
+        )
+        self.assertEqual(
+            self.calls("agent", "start"),
+            [
+                [
+                    "agent",
+                    "start",
+                    "impl-feat",
+                    "--kind",
+                    "claude",
+                    "--pane",
+                    "w1:p2",
+                    "--timeout",
+                    "120000",
+                    "--",
+                    "--model",
+                    "m",
+                    "--effort",
+                    "high",
+                    "--dangerously-skip-permissions",
+                ]
+            ],
+        )
+        prompts = self.calls("agent", "prompt")
+        self.assertEqual(len(prompts), 2, "the first prompt finds no agent; the second follows the start")
+        self.assertEqual(prompts[-1], ["agent", "prompt", "impl-feat", "do it", "--wait", "--timeout", "1000"])
+
+    def test_startup_dialogs_are_answered(self):
+        self.state.update(start_status="blocked", screen="Do you trust this folder? (y/n)")
+        self.save_state()
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, self.ACFG)
+        self.assertEqual((settled, note), (True, ""))
+        self.assertEqual(
+            self.calls("agent", "send-keys"),
+            [["agent", "send-keys", "rev-feat", "down"], ["agent", "send-keys", "rev-feat", "enter"]],
+        )
+        self.state.update(screen="Something unexpected?", agents={})
+        self.save_state()
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, self.ACFG)
+        self.assertEqual((settled, note), (True, "blocked at startup"))
+
+    def test_prompt_outcomes_for_an_existing_agent(self):
+        self.state["agents"] = {"impl-feat": {"status": "idle"}}
+        self.state["prompt_error"] = "timeout"
+        self.save_state()
+        self.assertEqual(
+            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, self.ACFG), (False, "")
+        )
+        self.state["prompt_error"] = "agent_blocked"
+        self.save_state()
+        self.assertEqual(
+            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, self.ACFG), (True, "agent_blocked")
+        )
+        self.assertEqual(self.calls("agent", "start"), [], "an existing agent is never started again")
+        self.assertEqual(h.agent_state("impl-feat"), "idle")
+        self.assertEqual(h.agent_state("nobody"), "gone")
+        self.assertEqual(h.wait_agent("nobody", 5), (True, "agent_not_found"))
+        self.state["wait_error"] = "timeout"
+        self.save_state()
+        self.assertEqual(h.wait_agent("impl-feat", 5), (False, ""))
+
+    def test_launch_driver_uses_the_driver_tab(self):
+        pane = h.launch_driver(self.r.root, self.r.wt, "feat", "two\nlines of feedback", "wB:p2")
+        self.assertEqual(pane, "w1:p2")
+        self.assertEqual(self.calls("tab", "create")[0][6:], ["--label", "driver", "--no-focus"])
+        run = self.calls("pane", "run")[0]
+        self.assertEqual(run[:3], ["pane", "run", "w1:p2"])
+        self.assertIn(f"{h.__file__} drive feat 'two lines of feedback' --notify wB:p2", run[3])
+        self.state.update(
+            tabs=[{"tab_id": "w1:t5", "label": "driver"}], panes=[{"pane_id": "w1:p7", "tab_id": "w1:t5"}]
+        )
+        self.save_state()
+        self.assertEqual(h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p7")
+        self.assertEqual(len(self.calls("tab", "create")), 1, "an existing driver tab is reused")
+        self.assertTrue(self.calls("pane", "run")[-1][3].endswith("drive feat"))
+
+    def test_worktree_create_nests_under_the_callers_workspace(self):
+        self.setenv("HERDR_WORKSPACE_ID", "w0")
+        res = h.create_worktree(self.r.root, "newf", "main", trust=True)
+        self.assertEqual(res["worktree"]["path"], str(self.r.tmp / "new-wt"))
+        create = self.calls("worktree", "create")[0]
+        self.assertEqual(
+            create[2:4], ["--workspace", "w0"], "the caller's workspace is on the main checkout: nest under it"
+        )
+        self.assertEqual(
+            create[4:], ["--branch", "newf", "--base", "main", "--label", "newf", "--no-focus", "--trust-repository"]
+        )
+        self.setenv("HERDR_WORKSPACE_ID", None)
+        h.create_worktree(self.r.root, "other", "main", trust=False)
+        self.assertEqual(self.calls("worktree", "create")[1][2:4], ["--cwd", str(self.r.root)])
+        self.assertNotIn("--trust-repository", self.calls("worktree", "create")[1])
+        self.assertEqual(h.worktree_workspace(self.r.root, self.r.wt), "w1")
+        closed = self.r.tmp / "closed"  # a real worktree whose herdr workspace is closed: it gets reopened
+        self.r.git("worktree", "add", "-q", "-b", "closed", str(closed))
+        self.assertEqual(h.worktree_workspace(self.r.root, closed), "w9")
+        self.assertEqual(
+            self.calls("worktree", "open")[0][2:],
+            ["--cwd", str(self.r.root), "--path", str(closed), "--no-focus"],
+        )
+
+    def test_sidebar_notify_and_remove_worktree(self):
+        h.sidebar(self.r.wt, "spec ready · needs you: approve")
+        self.assertEqual(
+            self.calls("workspace", "report-metadata"),
+            [
+                [
+                    "workspace",
+                    "report-metadata",
+                    "w1",
+                    "--source",
+                    "harness",
+                    "--token",
+                    "harness=spec ready · needs you: approve",
+                ]
+            ],
+        )
+        self.state["agents"] = {"wB:p2": {"status": "idle"}}
+        self.save_state()
+        h.notify("wB:p2", "harness: feat is done")
+        self.assertEqual(self.calls("agent", "prompt")[-1], ["agent", "prompt", "wB:p2", "harness: feat is done"])
+        self.r.git("merge", "-q", "--no-edit", "feat")  # the branch must be merged for `git branch -d`
+        self.r.write_cfg(teardown_cmd="echo torn > teardown.txt")
+        _, out = self.output(h.remove_worktree, self.r.root, self.r.wt, "feat", self.r.cfg())
+        self.assertIn("teardown_cmd: ok", out)
+        self.assertEqual(self.calls("worktree", "remove"), [["worktree", "remove", "--workspace", "w1", "--force"]])
+        self.assertFalse(self.r.wt.exists())
+        self.assertNotIn("feat", self.r.git("branch", "--format=%(refname:short)"))
+
+    def test_start_detached_prompts_the_orchestrator(self):
+        res = {"root_pane": {"pane_id": "w9:p1"}, "tab": {"tab_id": "w9:t1"}}
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": self.ACFG})
+        _, out = self.output(h.start_detached, self.r.cfg(), "feat", res)
+        self.assertEqual(self.calls("tab", "rename"), [["tab", "rename", "w9:t1", "orchestrator"]])
+        self.assertEqual(
+            self.calls("agent", "start")[0][2:8], ["feat", "--kind", "claude", "--pane", "w9:p1", "--timeout"]
+        )
+        self.assertEqual(
+            self.calls("agent", "prompt")[-1][2:],
+            ["feat", "Read harness/roles/orchestrator.md and follow it for harness/features/feat/."],
+        )
+        self.assertIn("orchestrator 'feat' started and prompted", out)
+
+    def test_doctor_sees_herdr_leftovers(self):
+        main = str(self.r.root)
+        self.state["workspaces"] = [
+            {
+                "workspace_id": "w0",
+                "label": "main",
+                "worktree": {"checkout_path": main, "is_linked_worktree": False, "repo_root": main},
+            },
+            {
+                "workspace_id": "w7",
+                "label": "dup",
+                "worktree": {"checkout_path": main, "is_linked_worktree": False, "repo_root": main},
+            },
+            {
+                "workspace_id": "w8",
+                "label": "gone",
+                "worktree": {"checkout_path": str(self.r.tmp / "gone"), "is_linked_worktree": True, "repo_root": main},
+            },
+        ]
+        self.save_state()
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.herdr_state)
+        self.assertIn("one herdr workspace on the main checkout (found w0, w7)", "\n".join(doc.problems))
+        self.assertIn("workspace w8 'gone' points at a removed worktree", "\n".join(doc.problems))
+        self.assertIn("herdr workspace close w8", out)
 
 
 if __name__ == "__main__":
