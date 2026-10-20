@@ -240,6 +240,46 @@ def load_cfg(root: Path) -> Config:
     )
 
 
+def claude_settings(acfg: dict) -> dict:
+    """What Claude Code should start with in this repo, read off the orchestrator entry: its model, and the
+    permission mode its args imply (--dangerously-skip-permissions -> bypassPermissions, --permission-mode X -> X)."""
+    args = list(acfg.get("args") or [])
+    mode = "default"
+    if "--dangerously-skip-permissions" in args:
+        mode = "bypassPermissions"
+    elif "--permission-mode" in args and args.index("--permission-mode") + 1 < len(args):
+        mode = args[args.index("--permission-mode") + 1]
+    out: dict = {"permissions": {"defaultMode": mode}}
+    if acfg.get("model"):
+        out["model"] = acfg["model"]
+    return out
+
+
+def write_local_settings(root: Path, cfg: Config) -> str:
+    """Keep .claude/settings.local.json (per machine, gitignored) in step with agents.orchestrator, so the Claude
+    the human opens in this repo starts with that model and permission mode. Other keys in the file are kept.
+    Returns one report line."""
+    acfg = cfg.agents["orchestrator"]
+    if acfg["kind"] != "claude":
+        return "orchestrator is not Claude Code: .claude/settings.local.json left alone"
+    want = claude_settings(acfg)
+    p = root / ".claude" / "settings.local.json"
+    try:
+        current = json.loads(p.read_text()) if p.exists() else {}
+    except json.JSONDecodeError:
+        current = {}
+    new = dict(current)
+    new["permissions"] = {**(current.get("permissions") or {}), **want["permissions"]}
+    if "model" in want:
+        new["model"] = want["model"]
+    what = f"model {want.get('model', '(Claude Code default)')}, permissions {want['permissions']['defaultMode']}"
+    if new == current:
+        return f"Claude Code in this repo: {what} (.claude/settings.local.json unchanged)"
+    p.parent.mkdir(exist_ok=True)
+    p.write_text(json.dumps(new, indent=2) + "\n")
+    return f"Claude Code in this repo: {what} (.claude/settings.local.json updated; restart Claude Code to apply)"
+
+
 def include_patterns(root: Path, cfg: Config) -> tuple[list[str], list[str]]:
     """copy_files from config.json plus the lines of .worktreeinclude; returns (patterns, rejected lines)."""
     pats, bad = list(cfg.copy_files), []
@@ -1331,7 +1371,8 @@ class Doctor:
 # ----------------------------------------------------------------------------- commands
 def cmd_config(a):
     """The setup the next feature would run with, for the orchestrator to show the human before `start`."""
-    cfg = load_cfg(repo_root())
+    root = main_checkout(repo_root())
+    cfg = load_cfg(root)
     print("harness/config.json")
     print(f"  base_branch        {cfg.base_branch}")
     print(f"  test_cmd           {cfg.test_cmd}")
@@ -1349,6 +1390,7 @@ def cmd_config(a):
         missing = "" if shutil.which(kind) else "   <- not in PATH"
         note = "   (only used by start --detach)" if role == "orchestrator" else ""
         print(f"  {role:<18} {kind:<7} {model:<28} effort {effort:<7} {args}{missing}{note}")
+    print(write_local_settings(root, cfg))
     print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
     return 0
 
@@ -1509,6 +1551,7 @@ def cmd_start(a):
     wt = Path(res["worktree"]["path"])
     seed_feature(wt, a.slug, a.intent)
     prepare_worktree(root, wt, cfg)
+    write_local_settings(root, cfg)
     sidebar(wt, state_text("pending", "", cfg.gates))
     ws_id = res["workspace"]["workspace_id"]
     print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")

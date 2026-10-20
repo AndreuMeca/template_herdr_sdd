@@ -18,7 +18,7 @@ has no model and no cost.
 | `teardown_cmd` | no | shell command or `""` | Run by `merge` in the worktree before removing it: `docker compose down`. |
 | `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
 | `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `auto`. |
-| `agents.<role>` | yes, all four | object, below | Which CLI and model run `orchestrator` (only `start --detach`), `spec_author`, `implementer`, `reviewer`. |
+| `agents.<role>` | yes, all four | object, below | Which CLI and model run `spec_author`, `implementer`, `reviewer`, and `orchestrator`. The orchestrator entry starts the agent of `start --detach`, and when its kind is `claude` it also sets what the Claude you open in this repo starts with: `config` and `start` write its `model` and the permission mode its `args` imply (`--dangerously-skip-permissions` → bypass, `--permission-mode X` → X, else default) to `.claude/settings.local.json`, read at the next session start. |
 
 ## `agents.<role>`
 

@@ -17,9 +17,10 @@
   once: run `uv run harness/harness.py config`, show its output together with the model you are running
   as, ask the human whether this is the setup they want, and wait for the answer (they may ask you to
   change it: `harness/roles/orchestrator.md` says how). Then follow `harness/roles/orchestrator.md`.
-- You are meant to run without permission prompts (`.claude/settings.json` puts Claude Code in bypass
-  mode here). If you are still being asked for permissions, say so and ask the human to restart you
-  with `claude --dangerously-skip-permissions` before going on.
+- You are meant to run as `agents.orchestrator` in `harness/config.json` says (model, permissions):
+  `config` writes that into `.claude/settings.local.json`, which Claude Code reads when a session starts.
+  When `config` reports that file as updated, or you are being asked for permissions you should not be
+  asked for, say so and ask the human to restart Claude Code in this repo before going on.
 
 ## 4. Where things are
 - Rules, lifecycle, what `check` enforces: `harness/docs/sdd.md`
