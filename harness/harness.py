@@ -66,9 +66,17 @@ SIDEBAR_ROWS = '[ui.sidebar.spaces]\nrows = [["state_icon", "workspace"], ["bran
 
 
 # ----------------------------------------------------------------------------- shell / git
+class Die(SystemExit):
+    """What `die` raises: the exit code, plus the message for a caller that reports it elsewhere."""
+
+    def __init__(self, msg: str, code: int):
+        super().__init__(code)
+        self.msg = msg
+
+
 def die(msg: str, code: int = EXIT_ERROR):
     print(f"error: {msg}", file=sys.stderr)
-    sys.exit(code)
+    raise Die(msg, code)
 
 
 def sh(args, cwd=None, check=True, stdin=None):
@@ -636,6 +644,19 @@ def driver_lock(wt: Path) -> Path:
     return Path(git("rev-parse", "--path-format=absolute", "--git-dir", cwd=wt)) / "harness-driver.pid"
 
 
+def driver_stamp(wt: Path) -> Path:
+    return driver_lock(wt).with_name("harness-driver.started")
+
+
+def stamp_value(stamp: Path) -> tuple:
+    """(mtime, content) of the start stamp, or () when there is none. A new driver changes it even if it exits at
+    once."""
+    try:
+        return stamp.stat().st_mtime_ns, stamp.read_text()
+    except FileNotFoundError:
+        return ()
+
+
 def driver_running(wt: Path) -> int:
     """pid of a live driver for this worktree, else 0."""
     try:
@@ -655,8 +676,12 @@ def driver_tab_pane(ws_id: str) -> str | None:
     if not tab:
         return None
     panes = herdr("pane", "list", "--workspace", ws_id).get("panes", [])
-    pane = next((p for p in panes if p.get("tab_id") == tab.get("tab_id")), None)
-    return pane.get("pane_id") if pane else None
+    # herdr lists a tab's Sidebar pane (no shell) before its shell pane: never that one
+    ours = [p for p in panes if p.get("tab_id") == tab.get("tab_id") and p.get("label") != "Sidebar"]
+    if not ours:
+        return None
+    pane = next((p for p in ours if not p.get("agent")), ours[0])  # the driver runs in the plain shell pane
+    return pane.get("pane_id")
 
 
 def launch_driver(root: Path, wt: Path, slug: str, msg: str, notify_pane: str) -> str:
@@ -671,8 +696,19 @@ def launch_driver(root: Path, wt: Path, slug: str, msg: str, notify_pane: str) -
     cmd = [sys.executable, str(Path(__file__).resolve()), "drive", slug]
     cmd += [msg] if msg else []
     cmd += ["--notify", notify_pane] if notify_pane else []
+    lock = driver_lock(wt)
+    if lock.exists() and not driver_running(wt):
+        lock.unlink()  # left by a driver that died
+    stamp = driver_stamp(wt)  # every driver rewrites it first thing and never removes it: a start leaves a trace
+    before = stamp_value(stamp)
     herdr("pane", "run", pane, shlex.join(cmd))
-    return pane
+    for _ in range(20):
+        if stamp_value(stamp) != before:
+            return pane
+        time.sleep(0.5)
+    raise HerdrError(
+        "driver_not_started", f"the driver did not start in pane {pane}; look at it: herdr pane read {pane} --lines 40"
+    )
 
 
 def agent_name(role: str, slug: str) -> str:
@@ -1095,6 +1131,7 @@ class Driver:
 
     def run(self) -> int:
         self.lock.write_text(str(os.getpid()))
+        driver_stamp(self.wt).write_text(f"{os.getpid()} {datetime.now():%Y-%m-%d %H:%M:%S}\n")
         self.log(
             f"driving {self.slug} in {self.wt}" + (f"; will notify pane {self.notify_pane}" if self.notify_pane else "")
         )
@@ -1143,17 +1180,32 @@ class Driver:
             self.stop(f"cannot run {role}: {err}", EXIT_ERROR)
         self.run_role(role, text, st, vd)
 
+    def auto_approve(self) -> tuple[str | None, str]:
+        """Approve a green spec; a red one goes back to the spec author with the errors."""
+        errs = check_feature(self.wt, self.slug, self.base)
+        if errs:
+            return "spec_author", "check fails:\n" + "\n".join(errs) + "\nFix the spec, commit."
+        approve_spec(self.wt, self.slug, self.f.branch)
+        return None, ""
+
+    def require_clean(self):
+        """Stop for the human when the worktree has uncommitted changes (a role that could not commit)."""
+        left = [p for _, p in porcelain(self.wt)]
+        if left:
+            more = " ..." if len(left) > 8 else ""
+            self.stop(
+                f"needs you: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them "
+                "(a role that cannot commit in a worktree? see the sandbox note in harness/help/config.md)",
+                EXIT_ATTENTION,
+            )
+
     def choose(self, nxt: str, st: str, text: str) -> tuple[str | None, str]:
         """The role to run now and its message; None when a gate was passed without running anyone.
         Stops at human gates."""
         if nxt.startswith("run "):
             return nxt[4:], text
         if nxt == "approve (auto)":
-            errs = check_feature(self.wt, self.slug, self.base)
-            if errs:
-                return "spec_author", "check fails:\n" + "\n".join(errs) + "\nFix the spec, commit."
-            approve_spec(self.wt, self.slug, self.f.branch)
-            return None, ""
+            return self.auto_approve()
         if nxt == "approve (human)":
             if not text:
                 self.stop(
@@ -1161,6 +1213,8 @@ class Driver:
                     f'or `harness.py drive {self.slug} "<feedback for the spec author>" --tab`'
                 )
             return "spec_author", text
+        if nxt.startswith("merge"):
+            self.require_clean()  # no role runs at this gate, so the clean-worktree check happens here
         if nxt == "merge (auto)":
             self.spawn_merge()
         if nxt == "merge (human)":
@@ -1232,18 +1286,13 @@ class Driver:
         main = main_checkout(self.wt)
         log = main / ".git" / f"harness-merge-{self.slug}.log"
         self.lock.unlink()  # `merge` refuses while a driver runs; this one is done
+        cmd = [sys.executable, str(Path(__file__).resolve()), "merge", self.slug]
+        cmd += ["--notify", self.notify_pane] if self.notify_pane else []  # `merge` reports its own outcome
         with log.open("w") as fh:
             subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "merge", self.slug],
-                cwd=main,
-                stdin=subprocess.DEVNULL,
-                stdout=fh,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+                cmd, cwd=main, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True
             )
         self.log(f"merging {self.slug} in the background (log: {log}); this workspace closes when it is done")
-        if self.notify_pane:
-            notify(self.notify_pane, f"harness: {self.slug} review approved; merging it now (log: {log})")
         raise _Stop(EXIT_DONE)
 
 
@@ -1696,11 +1745,19 @@ def remove_worktree(root: Path, wt: Path, slug: str, cfg: Config):
 def cmd_merge(a):
     root = repo_root()
     cfg = load_cfg(root)
-    f = merge_preconditions(root, cfg, a.slug)
-    land(root, f.wt, a.slug, cfg.base_branch)
-    remove_worktree(root, f.wt, a.slug, cfg)
+    try:
+        f = merge_preconditions(root, cfg, a.slug)
+        land(root, f.wt, a.slug, cfg.base_branch)
+        remove_worktree(root, f.wt, a.slug, cfg)
+    except Die as e:  # a detached merge has nobody watching its output: say why it failed
+        if a.notify:
+            log = root / ".git" / f"harness-merge-{a.slug}.log"
+            notify(a.notify, f"harness: {a.slug} merge failed: {e.msg.splitlines()[0]} (log: {log})")
+        raise
     sha = git("rev-parse", "--short", "HEAD", cwd=root)
     print(f"merged {a.slug} into {cfg.base_branch} at {sha}; status done; worktree removed; branch deleted")
+    if a.notify:
+        notify(a.notify, f"harness: {a.slug} merged into {cfg.base_branch} at {sha}")
     return 0
 
 
@@ -1768,6 +1825,9 @@ def main(argv=None) -> int:
         "merge", help="merge an approved, reviewed feature; mark done; remove the worktree (human, base branch)"
     )
     s.add_argument("slug")
+    s.add_argument(
+        "--notify", default="", metavar="PANE", help="herdr pane (hosting an agent) to prompt with the outcome"
+    )
     s.set_defaults(fn=cmd_merge)
 
     s = sub.add_parser("check", help="structural checks (+ tests from status review, or with --tests)")

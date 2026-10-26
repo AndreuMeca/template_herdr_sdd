@@ -208,6 +208,11 @@ elif cmd == "worktree remove":
     ok({"type": "worktree_removed"})
 elif cmd == "workspace list":
     ok({"workspaces": state.get("workspaces", [])})
+elif cmd == "pane run":
+    if state.get("touch_on_pane_run"):  # the driver that would start here writes its lock first thing
+        with open(state["touch_on_pane_run"], "a") as fh:  # a new line per launch, like a new driver's stamp
+            fh.write("started\n")
+    ok({"type": "ok"})
 else:
     ok({"type": "ok"})
 """
@@ -820,6 +825,23 @@ class DriverTests(Case):
             self.r.spec("in_progress")
         self.r.commit("feat: review", cwd=self.r.wt)
 
+    def reviewer_who_cannot_commit(self):
+        self.r.review("APPROVED")  # left uncommitted, as a sandboxed reviewer does
+
+    def test_uncommitted_review_stops_before_the_merge(self):
+        for gates in ({"approve": "auto", "merge": "auto"}, {"approve": "auto", "merge": "human"}):
+            with self.subTest(gates=gates):
+                self.setUp()
+                self.r.write_cfg(gates=gates)
+                self.actions["spec_author"] = [self.spec_author]
+                self.actions["implementer"] = [self.implementer]
+                self.actions["reviewer"] = [self.reviewer_who_cannot_commit]
+                code, _ = self.drive()
+                self.assertEqual(code, h.EXIT_ATTENTION)
+                self.assertIn("uncommitted changes left behind: harness/features/feat/review.md", self.notes[-1])
+                self.assertFalse(self.merged, "no merge is announced for a dirty worktree")
+                self.doCleanups()
+
     def drive(self, msg="", notify="pane"):
         f = h.locate(self.r.root, "feat")
         return self.output(h.Driver(self.r.root, self.r.cfg(), f, msg, notify).run)
@@ -961,6 +983,20 @@ class Commands(Case):
         self.assertEqual(h.feature_state(self.r.fdir)[0], "approved")
         self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
 
+    def test_merge_reports_a_failure_to_the_notify_pane(self):
+        self.chdir(self.r.root)
+        notes = []
+        self.stub("notify", lambda pane, text: notes.append(text))
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+            h.cmd_merge(Namespace(slug="feat", notify="wB:p2"))
+        self.assertEqual(ctx.exception.code, h.EXIT_ERROR)
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].startswith("harness: feat merge failed: 'feat' is status=pending verdict=-"), notes[0])
+        self.assertIn("harness-merge-feat.log", notes[0])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            h.cmd_merge(Namespace(slug="feat", notify=""))
+        self.assertEqual(len(notes), 1, "nothing to notify without --notify")
+
     def test_merge_lands_and_cleans_up(self):
         self.chdir(self.r.root)
         self.stub("workspace_of", lambda wt: None)
@@ -974,9 +1010,13 @@ class Commands(Case):
         self.r.ref()
         self.r.review("APPROVED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        code, out = self.output(h.cmd_merge, Namespace(slug="feat"))
+        notes = []
+        self.stub("notify", lambda pane, text: notes.append((pane, text)))
+        code, out = self.output(h.cmd_merge, Namespace(slug="feat", notify="wB:p2"))
         self.assertEqual(code, 0)
         self.assertIn("merged feat into main", out)
+        self.assertEqual(notes[-1][0], "wB:p2")
+        self.assertIn("harness: feat merged into main at", notes[-1][1])
         self.assertEqual(h.fm_read(self.r.root / "harness" / "features" / "feat" / "spec.md")["status"], "done")
         self.assertTrue((self.r.root / "tests" / "test_feat.py").exists())
         self.assertFalse(self.r.wt.exists())
@@ -1057,19 +1097,40 @@ class HerdrAdapter(Case):
         self.assertEqual(h.wait_agent("impl-feat", 5), (False, ""))
 
     def test_launch_driver_uses_the_driver_tab(self):
+        stamp = h.driver_stamp(self.r.wt)
+        self.state["touch_on_pane_run"] = str(stamp)
+        self.save_state()
+        h.driver_lock(self.r.wt).write_text("999999999")  # a lock left by a driver that died
         pane = h.launch_driver(self.r.root, self.r.wt, "feat", "two\nlines of feedback", "wB:p2")
         self.assertEqual(pane, "w1:p2")
+        self.assertFalse(h.driver_lock(self.r.wt).exists(), "the stale lock was removed before the launch")
         self.assertEqual(self.calls("tab", "create")[0][6:], ["--label", "driver", "--no-focus"])
         run = self.calls("pane", "run")[0]
         self.assertEqual(run[:3], ["pane", "run", "w1:p2"])
         self.assertIn(f"{h.__file__} drive feat 'two lines of feedback' --notify wB:p2", run[3])
+        self.assertTrue(stamp.exists(), "the launch is confirmed by the driver's start stamp")
+        # the tab exists: herdr lists its Sidebar pane first; the driver must go to the shell pane
+        sidebar = {"pane_id": "w1:p8", "tab_id": "w1:t5", "label": "Sidebar"}
         self.state.update(
-            tabs=[{"tab_id": "w1:t5", "label": "driver"}], panes=[{"pane_id": "w1:p7", "tab_id": "w1:t5"}]
+            tabs=[{"tab_id": "w1:t5", "label": "driver"}], panes=[sidebar, {"pane_id": "w1:p7", "tab_id": "w1:t5"}]
         )
         self.save_state()
         self.assertEqual(h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p7")
         self.assertEqual(len(self.calls("tab", "create")), 1, "an existing driver tab is reused")
         self.assertTrue(self.calls("pane", "run")[-1][3].endswith("drive feat"))
+        self.assertEqual(self.calls("pane", "run")[-1][2], "w1:p7", "never the Sidebar pane")
+        self.state["panes"] = [sidebar, {"pane_id": "w1:p9", "tab_id": "w1:t5", "agent": "claude"}]
+        self.save_state()
+        self.assertEqual(
+            h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p9", "the only shell-ish pane left"
+        )
+
+    def test_launch_driver_reports_a_driver_that_did_not_start(self):
+        with self.assertRaises(h.HerdrError) as ctx:
+            h.launch_driver(self.r.root, self.r.wt, "feat", "", "")
+        self.assertEqual(ctx.exception.code, "driver_not_started")
+        self.assertIn("herdr pane read w1:p2", ctx.exception.message)
+        self.assertEqual(len(self.calls("pane", "run")), 1)
 
     def test_worktree_create_nests_under_the_callers_workspace(self):
         self.setenv("HERDR_WORKSPACE_ID", "w0")

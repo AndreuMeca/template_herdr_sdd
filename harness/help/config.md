@@ -41,7 +41,9 @@ Ready-to-copy entries:
 ```
 `--permission-mode acceptEdits` still asks before shell commands: fine for a detached orchestrator you
 watch, not for roles. Codex's `--dangerously-bypass-approvals-and-sandbox` also drops the sandbox; only
-on a disposable machine. pi never asks. Other CLIs are unverified; put their non-interactive flag
+on a disposable machine. With `--sandbox workspace-write` instead, Codex cannot commit inside a feature
+worktree (the worktree's git dir lives in the main checkout): add `--add-dir <repo>/.git` to its `args`,
+or the driver stops at the merge gate with "uncommitted changes left behind". pi never asks. Other CLIs are unverified; put their non-interactive flag
 (Gemini CLI: `--yolo`) in `args`.
 
 ## herdr's sidebar

@@ -112,6 +112,8 @@ come from the main checkout's `config.json`, so a branch cannot change what it i
 - `drive <slug> "msg"`: the message goes to the first role run. At a gate, to the role that produced
   what is judged (spec → spec_author, merge → implementer); when blocked, to the implementer if the spec
   was ever approved, else the spec_author. `--tab` runs the driver in the feature's workspace and
-  returns; when it stops, it prompts the pane it was started from with `harness: <slug> ...`.
+  returns; when it stops, it prompts the pane it was started from with `harness: <slug> ...`. At the
+  merge gate a worktree with uncommitted changes stops the driver ("needs you") instead of merging; after
+  an `auto` merge, `merge` itself prompts that pane with the outcome (merged at `<sha>`, or why it failed).
 - While a driver runs a feature, `run` and `merge` refuse it; while a role agent is still working,
   `run` refuses to prompt it and the driver waits.

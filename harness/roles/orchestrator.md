@@ -39,7 +39,8 @@ STOP again:
   safe dialog (trust folder, confirm a flag): `herdr agent send-keys <agent> <key>`, then
   `drive <slug> --tab`. Anything else: tell the human.
 
-`auto` gates need nothing from you: the driver approves or merges and tells you.
+`auto` gates need nothing from you: the driver approves by itself, and `merge` tells you when it merged
+(`harness: <slug> merged into main at <sha>`) or why it failed.
 
 ## Detached (started with `start --detach`)
 You live inside the feature's worktree workspace and drive that one feature. `approve` prompts you
