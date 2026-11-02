@@ -9,6 +9,8 @@ every agent reads; the rest of the repo is your project.
 - git and [uv](https://docs.astral.sh/uv/) (the launcher is stdlib-only Python; `python3 harness/harness.py` also works)
 - [herdr](https://herdr.dev/docs/install/): `curl -fsSL https://herdr.dev/install.sh | sh`
 - The agent CLIs named in `harness/config.json`, logged in
+- A read of the trust model, `harness/docs/sdd.md` §9: role agents run with the permissions you give them
+  in `config.json`, and the harness's checks catch mistakes, not a hostile agent
 
 ## New project
 1. `git clone <this repo> myproject && cd myproject && rm -rf .git && git init -b main`
