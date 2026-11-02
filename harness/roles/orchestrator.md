@@ -7,8 +7,9 @@ human's request, is `harness/config.json`. Read `harness/docs/sdd.md` once.
 
 ## The setup
 `AGENTS.md` §3 has you show `uv run harness/harness.py config` and your own model before your first
-`start` or `drive` in a session, and wait for a yes. `config` only shows; `config --apply` (which writes
-your own model and permission mode for the next session) is the human's to run, never yours. If the human asks for changes, edit `harness/config.json` yourself
+`start` or `drive` in a session, and wait for a yes. `config` only shows; writing your own model and permission
+mode for the next session is the human's to do (`doctor` in their terminal, or `config --apply`), never
+yours: run inside your session, `doctor` only reports. If the human asks for changes, edit `harness/config.json` yourself
 (keys and per-CLI entries: `harness/help/config.md`; a config tweak on the base checkout, not feature
 work), run `config` again, show it, and once they confirm, commit it on the base branch as
 `chore: harness config <what changed>`. Show the setup again whenever `harness/config.json` changed

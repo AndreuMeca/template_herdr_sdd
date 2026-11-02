@@ -22,14 +22,14 @@ every agent reads; the rest of the repo is your project.
    checkout: get it all green before the first feature, or the first implementer gets blamed for a red
    baseline (`--no-tests` skips that run). `doctor --models` also sends each Claude Code and Codex role
    one tiny prompt with its model, so a wrong model id fails there (a few tokens). The Claude you open in this
-   repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `config
-   --apply` writes them to `.claude/settings.local.json` (per machine, not committed), so with
+   repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `doctor`, run
+   in your terminal, writes them to `.claude/settings.local.json` (per machine, not committed), so with
    `"permissions": "full"` the orchestrator never stops to ask (accept Claude Code's one-time warning).
    Effort and permissions use the file's own words for every CLI (`low`…`max`, `ask`/`edits`/`guarded`/
-   `full`); `harness/help/config.md` shows what each CLI is given. Run `uv run harness/harness.py config --apply` once after cloning and after
-   every change to `agents.orchestrator`, then start Claude. Plain `config` only shows the setup; the
-   file `--apply` writes also lets the agent run the launcher and denies it `--apply`, so it cannot raise
-   its own permissions. Nothing tool-specific is committed: `.claude/` only appears on a machine whose
+   `full`); `harness/help/config.md` shows what each CLI is given. Run `doctor` after cloning and after
+   every change to `agents.orchestrator`, then start Claude. Run by an agent inside Claude Code, `doctor`
+   and `config` only report; the file it writes also lets the agent run the launcher and denies it
+   `config --apply`, so it cannot raise its own permissions. Nothing tool-specific is committed: `.claude/` only appears on a machine whose
    orchestrator is Claude Code.
 
 ## Daily flow
@@ -64,7 +64,3 @@ harness/
   features/<slug>/             spec.md, tasks.md, log.md, review.md
 ```
 State is markdown: `status` in `spec.md`, `verdict` in `review.md`; `status` scans every worktree.
-
-## Credits
-Adapted from [betta-tech/harness-sdd](https://github.com/betta-tech/harness-sdd), built on
-[herdr](https://herdr.dev).

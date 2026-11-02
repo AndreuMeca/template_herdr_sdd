@@ -53,8 +53,8 @@ src/m.py
 {questions}
 """
 AGENTS = {
-    "orchestrator": {"kind": "claude"},
-    **{r: {"kind": "claude", "permissions": "full"} for r in ("spec_author", "implementer", "reviewer")},
+    "orchestrator": {"harness": "claude"},
+    **{r: {"harness": "claude", "permissions": "full"} for r in ("spec_author", "implementer", "reviewer")},
 }
 
 
@@ -251,6 +251,7 @@ class Case(unittest.TestCase):
     def setUp(self):
         self.r = Repo(**self.repo_kwargs)
         self.addCleanup(self.r.close)
+        self.setenv("CLAUDECODE", "1")  # as when an agent runs it; a test clears it to be the human's terminal
         if self.fake_herdr:
             self.install_fake_herdr()
         else:
@@ -392,8 +393,10 @@ class PureFunctions(unittest.TestCase):
             ("codex", "full"): ["--dangerously-bypass-approvals-and-sandbox"],
         }
         for (kind, level), flags in cases.items():
-            self.assertEqual(agent({"kind": kind, "permissions": level}).cli_args(repo), ["--", *flags], (kind, level))
-        self.assertEqual(agent({"kind": "pi", "permissions": "full"}).cli_args(repo), [], "pi never asks: no flag")
+            self.assertEqual(
+                agent({"harness": kind, "permissions": level}).cli_args(repo), ["--", *flags], (kind, level)
+            )
+        self.assertEqual(agent({"harness": "pi", "permissions": "full"}).cli_args(repo), [], "pi never asks: no flag")
 
     def test_patterns_args_prompt(self):
         self.assertTrue(h.valid_pattern(".env"))
@@ -401,13 +404,13 @@ class PureFunctions(unittest.TestCase):
         for bad in ("/etc/passwd", "../x", "", ".", 3):
             self.assertFalse(h.valid_pattern(bad), bad)
         repo = Path("/r")
-        self.assertEqual(agent({"kind": "claude"}).cli_args(repo), [])
+        self.assertEqual(agent({"harness": "claude"}).cli_args(repo), [])
         self.assertEqual(
-            agent({"kind": "gemini", "model": "m", "args": ["-x"]}).cli_args(repo), ["--", "--model", "m", "-x"]
+            agent({"harness": "gemini", "model": "m", "args": ["-x"]}).cli_args(repo), ["--", "--model", "m", "-x"]
         )
-        self.assertEqual(agent({"kind": "claude", "effort": "extra"}).cli_args(repo), ["--", "--effort", "xhigh"])
+        self.assertEqual(agent({"harness": "claude", "effort": "extra"}).cli_args(repo), ["--", "--effort", "xhigh"])
         self.assertEqual(
-            agent({"kind": "codex", "model": "g", "effort": "high", "permissions": "full", "args": ["-y"]}).cli_args(
+            agent({"harness": "codex", "model": "g", "effort": "high", "permissions": "full", "args": ["-y"]}).cli_args(
                 repo
             ),
             [
@@ -421,9 +424,9 @@ class PureFunctions(unittest.TestCase):
             ],
             "model, effort, permissions, then args",
         )
-        self.assertEqual(agent({"kind": "gemini", "effort": "high", "permissions": "full"}).cli_args(repo), [])
+        self.assertEqual(agent({"harness": "gemini", "effort": "high", "permissions": "full"}).cli_args(repo), [])
         self.assertEqual(
-            agent({"kind": "gemini", "args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}).cli_args(repo),
+            agent({"harness": "gemini", "args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}).cli_args(repo),
             ["--", "--add-dir", "/r/.git", "-c", "x={a}"],
             "{repo} is the main checkout; other braces stay as written",
         )
@@ -438,16 +441,16 @@ class ConfigTests(Case):
     def test_claude_settings_from_the_orchestrator_entry(self):
         rules = {"allow": [h.CLAUDE_ALLOW], "deny": [h.CLAUDE_DENY]}
         self.assertEqual(
-            agent({"kind": "claude"}).claude_settings(), {"permissions": {"defaultMode": "default", **rules}}
+            agent({"harness": "claude"}).claude_settings(), {"permissions": {"defaultMode": "default", **rules}}
         )
         self.assertEqual(
-            agent({"kind": "claude", "model": "m", "permissions": "full"}).claude_settings(),
+            agent({"harness": "claude", "model": "m", "permissions": "full"}).claude_settings(),
             {"permissions": {"defaultMode": "bypassPermissions", **rules}, "model": "m"},
         )
         modes = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
         for level, mode in modes.items():
             self.assertEqual(
-                agent({"kind": "claude", "permissions": level}).claude_settings()["permissions"]["defaultMode"], mode
+                agent({"harness": "claude", "permissions": level}).claude_settings()["permissions"]["defaultMode"], mode
             )
 
     def test_write_local_settings(self):
@@ -457,7 +460,7 @@ class ConfigTests(Case):
         self.r.write_cfg(
             agents={
                 **AGENTS,
-                "orchestrator": {"kind": "claude", "model": "m", "permissions": "full"},
+                "orchestrator": {"harness": "claude", "model": "m", "permissions": "full"},
             }
         )
         line = h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply()
@@ -477,7 +480,7 @@ class ConfigTests(Case):
             },
         )
         self.assertIn("unchanged", h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply())
-        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "codex"}})
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"harness": "codex"}})
         self.assertIn("left alone", h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply())
         self.assertEqual(json.loads(p.read_text())["model"], "m")
 
@@ -513,7 +516,7 @@ class ConfigTests(Case):
             h.Config.load(self.r.root)
 
     def test_rejects_agents_outside_the_vocabulary(self):
-        full = {"kind": "claude", "permissions": "full"}
+        full = {"harness": "claude", "permissions": "full"}
         bad = {
             "effort 'turbo' is not ours": (
                 {"reviewer": {**full, "effort": "turbo"}},
@@ -522,14 +525,14 @@ class ConfigTests(Case):
             "a provider word": ({"reviewer": {**full, "effort": "xhigh"}}, "here it is 'extra'"),
             "effort as a number": ({"reviewer": {**full, "effort": 3}}, "effort must be one of"),
             "unknown permissions": (
-                {"reviewer": {"kind": "claude", "permissions": "yolo"}},
+                {"reviewer": {"harness": "claude", "permissions": "yolo"}},
                 "must be one of ask, edits",
             ),
-            "a role that would ask": ({"reviewer": {"kind": "claude", "permissions": "ask"}}, "first prompt"),
-            "a role without permissions": ({"reviewer": {"kind": "claude"}}, "it is required"),
-            "pi cannot be guarded": ({"reviewer": {"kind": "pi", "permissions": "guarded"}}, "not available for pi"),
+            "a role that would ask": ({"reviewer": {"harness": "claude", "permissions": "ask"}}, "first prompt"),
+            "a role without permissions": ({"reviewer": {"harness": "claude"}}, "it is required"),
+            "pi cannot be guarded": ({"reviewer": {"harness": "pi", "permissions": "guarded"}}, "not available for pi"),
             "codex has no edits": (
-                {"orchestrator": {"kind": "codex", "permissions": "edits"}},
+                {"orchestrator": {"harness": "codex", "permissions": "edits"}},
                 "(it has: ask, guarded",
             ),
             "the flag by hand": (
@@ -543,9 +546,11 @@ class ConfigTests(Case):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
                 h.Config.load(self.r.root)
             self.assertIn(msg, err.getvalue(), why)
-        self.r.write_cfg(agents={**AGENTS, "reviewer": {"kind": "gemini", "permissions": "full", "args": ["--yolo"]}})
+        self.r.write_cfg(
+            agents={**AGENTS, "reviewer": {"harness": "gemini", "permissions": "full", "args": ["--yolo"]}}
+        )
         self.assertEqual(
-            h.Config.load(self.r.root).agent("reviewer").kind, "gemini", "an untranslated CLI: flags in args"
+            h.Config.load(self.r.root).agent("reviewer").harness, "gemini", "an untranslated CLI: flags in args"
         )
 
     def test_worktreeinclude(self):
@@ -1215,8 +1220,8 @@ class Commands(Case):
         self.chdir(self.r.wt)  # from a worktree it still shows the main checkout's config
         agents = {
             **AGENTS,
-            "implementer": {"kind": "codex", "effort": "max", "permissions": "guarded", "args": ["-x"]},
-            "reviewer": {"kind": "gemini", "effort": "high", "permissions": "full"},
+            "implementer": {"harness": "codex", "effort": "max", "permissions": "guarded", "args": ["-x"]},
+            "reviewer": {"harness": "gemini", "effort": "high", "permissions": "full"},
         }
         self.r.write_cfg(gates={"approve": "auto"}, agents=agents)
         code, out = self.output(h.cmd_config, Namespace(apply=False))
@@ -1234,12 +1239,15 @@ class Commands(Case):
     def test_config_shows_and_only_apply_writes_the_settings(self):
         self.chdir(self.r.root)
         p = self.r.root / ".claude" / "settings.local.json"
-        orch = {"kind": "claude", "model": "m", "permissions": "full"}
+        orch = {"harness": "claude", "model": "m", "permissions": "full"}
         self.r.write_cfg(agents={**AGENTS, "orchestrator": orch})
         _, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertFalse(p.exists(), "plain config never writes: raising permissions is the human's call")
         self.assertIn("model m, permissions bypassPermissions, which .claude/settings.local.json does not say", out)
-        self.assertIn("run yourself: uv run harness/harness.py config --apply, then restart Claude Code", out)
+        self.assertIn(
+            "run yourself in a terminal: uv run harness/harness.py doctor (or uv run harness/harness.py config",
+            out,
+        )
         _, out = self.output(h.cmd_config, Namespace(apply=True))
         self.assertIn("updated; restart Claude Code", out)
         self.assertEqual(json.loads(p.read_text())["permissions"]["defaultMode"], "bypassPermissions")
@@ -1248,7 +1256,7 @@ class Commands(Case):
 
     def test_start_leaves_the_claude_settings_alone(self):
         self.chdir(self.r.root)
-        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "claude", "model": "m"}})
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"harness": "claude", "model": "m"}})
 
         def create(root, slug, base, trust):
             path = self.r.tmp / "wt-new"
@@ -1339,7 +1347,7 @@ class Commands(Case):
 # ----------------------------------------------------------------------------- the herdr adapter, through a fake herdr
 class HerdrAdapter(Case):
     fake_herdr = True
-    ACFG = {"kind": "claude", "model": "m", "effort": "high", "permissions": "full"}
+    ACFG = {"harness": "claude", "model": "m", "effort": "high", "permissions": "full"}
 
     def test_prompt_or_start_starts_the_agent_in_its_own_tab(self):
         settled, note = h.HERDR.prompt_or_start(
@@ -1377,7 +1385,7 @@ class HerdrAdapter(Case):
         self.assertEqual(prompts[-1], ["agent", "prompt", "impl-feat", "do it", "--wait", "--timeout", "1000"])
 
     def test_repo_placeholder_is_the_main_checkout(self):
-        acfg = {"kind": "codex", "args": ["--add-dir", "{repo}/.git"]}
+        acfg = {"harness": "codex", "args": ["--add-dir", "{repo}/.git"]}
         h.HERDR.prompt_or_start(
             self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, agent(acfg)
         )  # from inside the worktree
@@ -1402,7 +1410,7 @@ class HerdrAdapter(Case):
         self.assertEqual((settled, note), (True, "blocked at startup"))
         self.state.update(screen="Do you trust this folder? (y/n)", agents={})
         self.save_state()
-        codex = {"kind": "codex", "permissions": "full"}
+        codex = {"harness": "codex", "permissions": "full"}
         settled, note = h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, agent(codex))
         self.assertEqual(note, "blocked at startup", "a dialog is answered only for the CLI known to show it")
         self.assertEqual(len(self.calls("agent", "send-keys")), 2)
@@ -1559,6 +1567,24 @@ class HerdrAdapter(Case):
 
 
 class DoctorChecks(Case):
+    def test_doctor_applies_the_claude_settings_only_from_the_humans_terminal(self):
+        p = self.r.root / ".claude" / "settings.local.json"
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"harness": "claude", "model": "m", "permissions": "full"}})
+        doc = h.Doctor(self.r.root)
+        self.output(doc.config, self.r.cfg())
+        self.assertFalse(p.exists(), "inside Claude Code doctor only reports: an agent cannot raise its permissions")
+        self.assertTrue(any("run yourself in a terminal" in n for n in doc.notes))
+        self.setenv("CLAUDECODE", None)
+        _, out = self.output(h.Doctor(self.r.root).config, self.r.cfg())
+        self.assertIn("ok    Claude Code in this repo: model m, permissions bypassPermissions", out)
+        self.assertIn("updated; restart Claude Code", out)
+        self.assertEqual(json.loads(p.read_text())["permissions"]["deny"], [h.CLAUDE_DENY])
+        _, out = self.output(h.Doctor(self.r.root).config, self.r.cfg())
+        self.assertIn("unchanged", out)
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"harness": "codex"}})
+        _, out = self.output(h.Doctor(self.r.root).config, self.r.cfg())
+        self.assertNotIn("settings.local.json", out)
+
     def test_baseline_runs_test_cmd_unless_skipped(self):
         self.r.write_cfg(test_cmd="echo boom; false")
         doc = h.Doctor(self.r.root)
@@ -1588,10 +1614,10 @@ class DoctorChecks(Case):
         self.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
         self.r.write_cfg(
             agents={
-                "orchestrator": {"kind": "claude", "model": "good"},
-                "spec_author": {"kind": "claude", "model": "good", "permissions": "full"},
-                "implementer": {"kind": "pi", "model": "x/y", "permissions": "full"},
-                "reviewer": {"kind": "codex", "model": "bad", "permissions": "guarded"},
+                "orchestrator": {"harness": "claude", "model": "good"},
+                "spec_author": {"harness": "claude", "model": "good", "permissions": "full"},
+                "implementer": {"harness": "pi", "model": "x/y", "permissions": "full"},
+                "reviewer": {"harness": "codex", "model": "bad", "permissions": "guarded"},
             }
         )
         doc = h.Doctor(self.r.root, models=True)
