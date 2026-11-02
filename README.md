@@ -27,8 +27,10 @@ every agent reads; the rest of the repo is your project.
    `"permissions": "full"` the orchestrator never stops to ask (accept Claude Code's one-time warning).
    Effort and permissions use the file's own words for every CLI (`low`…`max`, `ask`/`edits`/`guarded`/
    `full`); `harness/help/config.md` shows what each CLI is given. Run `uv run harness/harness.py config --apply` once after cloning and after
-   every change to `agents.orchestrator`, then start Claude. Plain `config` only shows the setup, and the
-   agent is denied `--apply` (`.claude/settings.json`), so it cannot raise its own permissions.
+   every change to `agents.orchestrator`, then start Claude. Plain `config` only shows the setup; the
+   file `--apply` writes also lets the agent run the launcher and denies it `--apply`, so it cannot raise
+   its own permissions. Nothing tool-specific is committed: `.claude/` only appears on a machine whose
+   orchestrator is Claude Code.
 
 ## Daily flow
 You, to the agent on `main`: "Build email+password login with a cookie session." It runs `start login`

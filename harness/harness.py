@@ -82,6 +82,8 @@ PERMISSION_WORDS = {
     "full": "never asks, no limits",
 }
 CLAUDE_MODES = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
+CLAUDE_ALLOW = "Bash(uv run harness/harness.py:*)"
+CLAUDE_DENY = "Bash(uv run harness/harness.py config --apply:*)"
 PROVIDER_EFFORTS = {"minimal": "low", "xhigh": "extra"}  # provider words people may type, and ours
 PERMISSION_FLAGS = ("--dangerously-", "--permission-mode", "--sandbox", "--ask-for-approval", "--yolo")
 
@@ -350,8 +352,15 @@ class AgentConfig:
 
     def claude_settings(self) -> dict:
         """What Claude Code should start with in this repo when this is the orchestrator: its model, and the
-        permission mode of its `permissions` level (CLAUDE_MODES; unset = ask = Claude Code's default)."""
-        out: dict = {"permissions": {"defaultMode": CLAUDE_MODES[self.permissions or "ask"]}}
+        permission mode of its `permissions` level (CLAUDE_MODES; unset = ask = Claude Code's default), leave to run
+        the launcher without asking, and a deny on `config --apply` so it cannot raise its own permissions."""
+        out: dict = {
+            "permissions": {
+                "defaultMode": CLAUDE_MODES[self.permissions or "ask"],
+                "allow": [CLAUDE_ALLOW],
+                "deny": [CLAUDE_DENY],
+            }
+        }
         if self.model:
             out["model"] = self.model
         return out
@@ -464,7 +473,12 @@ class ClaudeSettings:
         except json.JSONDecodeError:
             current = {}
         new = dict(current)
-        new["permissions"] = {**(current.get("permissions") or {}), **want["permissions"]}
+        perms = dict(current.get("permissions") or {})
+        perms["defaultMode"] = want["permissions"]["defaultMode"]
+        for key in ("allow", "deny"):  # added to the human's own rules, never replacing them
+            have = perms.get(key) or []
+            perms[key] = have + [r for r in want["permissions"][key] if r not in have]
+        new["permissions"] = perms
         if "model" in want:
             new["model"] = want["model"]
         mode = want["permissions"]["defaultMode"]

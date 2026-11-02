@@ -436,10 +436,13 @@ class PureFunctions(unittest.TestCase):
 # ----------------------------------------------------------------------------- config and worktree files
 class ConfigTests(Case):
     def test_claude_settings_from_the_orchestrator_entry(self):
-        self.assertEqual(agent({"kind": "claude"}).claude_settings(), {"permissions": {"defaultMode": "default"}})
+        rules = {"allow": [h.CLAUDE_ALLOW], "deny": [h.CLAUDE_DENY]}
+        self.assertEqual(
+            agent({"kind": "claude"}).claude_settings(), {"permissions": {"defaultMode": "default", **rules}}
+        )
         self.assertEqual(
             agent({"kind": "claude", "model": "m", "permissions": "full"}).claude_settings(),
-            {"permissions": {"defaultMode": "bypassPermissions"}, "model": "m"},
+            {"permissions": {"defaultMode": "bypassPermissions", **rules}, "model": "m"},
         )
         modes = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
         for level, mode in modes.items():
@@ -464,7 +467,11 @@ class ConfigTests(Case):
         self.assertEqual(
             written,
             {
-                "permissions": {"allow": ["Bash(ls:*)"], "defaultMode": "bypassPermissions"},
+                "permissions": {
+                    "allow": ["Bash(ls:*)", h.CLAUDE_ALLOW],
+                    "defaultMode": "bypassPermissions",
+                    "deny": [h.CLAUDE_DENY],
+                },
                 "theme": "dark",
                 "model": "m",
             },
