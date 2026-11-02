@@ -998,13 +998,43 @@ class Commands(Case):
             "reviewer": {"kind": "pi", "effort": "high"},
         }
         self.r.write_cfg(gates={"approve": "auto"}, agents=agents)
-        code, out = self.output(h.cmd_config, Namespace())
+        code, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertEqual(code, 0)
         self.assertIn("gates              approve: auto   merge: human", out)
         self.assertIn("implementer        codex   (default model)              effort xhigh   -x", out)
         self.assertIn("effort high (ignored: no effort setting for this CLI)", out)
         self.assertIn("(only used by start --detach)", out)
         self.assertIn("copy_files         .env", out)
+
+    def test_config_shows_and_only_apply_writes_the_settings(self):
+        self.chdir(self.r.root)
+        p = self.r.root / ".claude" / "settings.local.json"
+        orch = {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": orch})
+        _, out = self.output(h.cmd_config, Namespace(apply=False))
+        self.assertFalse(p.exists(), "plain config never writes: raising permissions is the human's call")
+        self.assertIn("model m, permissions bypassPermissions, which .claude/settings.local.json does not say", out)
+        self.assertIn("run yourself: uv run harness/harness.py config --apply, then restart Claude Code", out)
+        _, out = self.output(h.cmd_config, Namespace(apply=True))
+        self.assertIn("updated; restart Claude Code", out)
+        self.assertEqual(json.loads(p.read_text())["permissions"]["defaultMode"], "bypassPermissions")
+        _, out = self.output(h.cmd_config, Namespace(apply=False))
+        self.assertIn("(in step with .claude/settings.local.json)", out)
+
+    def test_start_leaves_the_claude_settings_alone(self):
+        self.chdir(self.r.root)
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "claude", "model": "m"}})
+
+        def create(root, slug, base, trust):
+            path = self.r.tmp / "wt-new"
+            self.r.git("worktree", "add", "-q", "-b", slug, str(path), base)
+            return {"worktree": {"path": str(path)}, "workspace": {"workspace_id": "w9"}}
+
+        self.stub("create_worktree", create)
+        code, _ = self.output(h.cmd_start, Namespace(slug="newf", intent="do y", trust=False, detach=False))
+        self.assertEqual(code, 0)
+        self.assertTrue((self.r.tmp / "wt-new" / "harness" / "features" / "newf" / "spec.md").exists())
+        self.assertFalse((self.r.root / ".claude" / "settings.local.json").exists())
 
     def test_check_command_finds_the_worktree(self):
         self.chdir(self.r.root)
