@@ -518,8 +518,25 @@ class GitHelpers(Case):
         h.drop_review(self.r.wt, "feat")
         self.r.review("APPROVED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        self.assertEqual(h.review_rounds(self.r.wt, "feat", "main"), 2, "the launcher's removals do not count")
+        self.assertEqual(h.review_rounds(self.r.wt, "feat", "main"), 1, "an APPROVED round does not count")
         self.assertIn("feat: clear previous review", self.r.git("log", "--format=%s", "main..HEAD", cwd=self.r.wt))
+
+    def test_review_rounds_count_changes_requested_rounds_not_commits(self):
+        rounds = lambda: h.review_rounds(self.r.wt, "feat", "main")  # noqa: E731
+        self.r.review("CHANGES_REQUESTED")
+        self.r.commit("feat: review", cwd=self.r.wt)
+        (self.r.fdir / "review.md").write_text((self.r.fdir / "review.md").read_text() + "- one more finding\n")
+        self.r.commit("feat: review, one more finding", cwd=self.r.wt)
+        self.assertEqual(rounds(), 1, "two commits in one round are one round")
+        h.drop_review(self.r.wt, "feat")
+        self.assertEqual(rounds(), 1, "a cleared round still counts")
+        self.r.review("CHANGES_REQUESTED")
+        self.r.commit("feat: review", cwd=self.r.wt)
+        h.drop_review(self.r.wt, "feat")
+        self.assertEqual(rounds(), 2)
+        self.r.review("CHANGES_REQUESTED")
+        self.r.commit("feat: review", cwd=self.r.wt)
+        self.assertEqual(rounds(), 3, "the verdict on disk counts too")
 
     def test_block_feature(self):
         h.block_feature(self.r.wt, "feat", "why")
@@ -598,6 +615,38 @@ class CheckRules(Case):
         self.assertIn("feat: no test carries the token feat:R1", errs)
         self.assertIn("feat: T1 is not ticked", errs)
         self.assertIn("feat: missing log.md", errs)
+
+    def test_rule_4_matches_the_whole_token(self):
+        self.approved()
+        self.r.spec("review")
+        test = self.r.wt / "tests" / "test_feat.py"
+        missing = "feat: no test carries the token feat:R1"
+        test.write_text("# feat:R10\n# xfeat:R1\n# my-feat:R1\n# feat:R1x\ndef test_f():\n    assert True\n")
+        self.assertIn(missing, self.r.check(), "longer tokens do not cover R1")
+        for line in ("# covers feat:R1", '"""(feat:R1)"""', "feat:R1"):
+            test.write_text(line + "\ndef test_f():\n    assert True\n")
+            self.assertNotIn(missing, self.r.check(), line)
+
+    def test_template_placeholders(self):
+        tmpl = self.r.wt / "harness" / "features" / "_template"
+        for name in ("spec.md", "tasks.md"):
+            (self.r.fdir / name).write_text((tmpl / name).read_text().replace("{{slug}}", "feat"))
+        h.fm_set(self.r.fdir / "spec.md", "status", "spec_ready")
+        errs = self.r.check()
+        for err in (
+            "feat: R1 still has the template placeholder <trigger>",
+            "feat: R2 still has the template placeholder <unwanted condition>",
+            "feat: T1 still has the template placeholder <task>",
+            "feat: T2 still has the template placeholder <task>",
+        ):
+            self.assertIn(err, errs)
+        self.assertFalse([e for e in errs if "T3" in e], "the template's last task is meant to be kept")
+
+    def test_placeholders_mirror_the_template(self):
+        tmpl = HERE / "features" / "_template"
+        text = (tmpl / "spec.md").read_text() + (tmpl / "tasks.md").read_text()
+        for token in h.TEMPLATE_PLACEHOLDERS:
+            self.assertIn(token, text)
 
     def test_rule_9_reviewer_scope(self):
         self.approved()
