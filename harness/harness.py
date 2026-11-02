@@ -69,6 +69,47 @@ SYNC_MSG = (
     "The base branch '{base}' was merged into this branch and the merge conflicts. "
     "Resolve the conflicts, keep `check --tests` green, commit."
 )
+# config.json speaks one vocabulary for every CLI; CLIS translates it (harness/help/config.md has the same tables)
+EFFORT_LEVELS = ("low", "medium", "high", "extra", "max")
+PERMISSION_LEVELS = ("ask", "edits", "guarded", "full")
+ROLE_PERMISSIONS = ("guarded", "full")  # a role agent runs unattended: it must never stop to ask
+PERMISSION_WORDS = {
+    "ask": "asks before edits and commands",
+    "edits": "edits freely, asks before commands",
+    "guarded": "never asks, the CLI blocks risky actions",
+    "full": "never asks, no limits",
+}
+CLAUDE_MODES = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
+PROVIDER_EFFORTS = {"minimal": "low", "xhigh": "extra"}  # provider words people may type, and ours
+PERMISSION_FLAGS = ("--dangerously-", "--permission-mode", "--sandbox", "--ask-for-approval", "--yolo")
+CLIS = {
+    "claude": {
+        "effort": ("--effort", "{}"),
+        "efforts": {"low": "low", "medium": "medium", "high": "high", "extra": "xhigh", "max": "max"},
+        "permissions": {
+            "ask": ["--permission-mode", "manual"],
+            "edits": ["--permission-mode", "acceptEdits"],
+            "guarded": ["--permission-mode", "auto"],
+            "full": ["--dangerously-skip-permissions"],
+        },
+        "guarded_by": "auto mode's classifier",
+    },
+    "codex": {
+        "effort": ("-c", "model_reasoning_effort={}"),
+        "efforts": {"low": "low", "medium": "medium", "high": "high", "extra": "xhigh", "max": "xhigh"},
+        "permissions": {
+            "ask": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+            "guarded": ["--sandbox", "workspace-write", "--ask-for-approval", "never", "--add-dir", "{repo}/.git"],
+            "full": ["--dangerously-bypass-approvals-and-sandbox"],
+        },
+        "guarded_by": "its sandbox: writes only in the worktree",
+    },
+    "pi": {  # pi has no permission modes: it never asks
+        "effort": ("--thinking", "{}"),
+        "efforts": {"low": "low", "medium": "medium", "high": "high", "extra": "xhigh", "max": "max"},
+        "permissions": {"full": []},
+    },
+}
 SIDEBAR_ROWS = '[ui.sidebar.spaces]\nrows = [["state_icon", "workspace"], ["branch", "git_status"], ["$harness"]]'
 
 
@@ -199,17 +240,34 @@ class Config:
 
 
 def validate_agents(agents: dict, p: Path):
-    """Every role has a CLI kind; an effort, when given, is one its CLI accepts."""
+    """Every role has a CLI kind, and effort and permissions in this file's own words (EFFORT_LEVELS,
+    PERMISSION_LEVELS) that its CLI can take; the flags they translate to are never written by hand in `args`."""
     for role in ("orchestrator", *ROLES):
         acfg = agents.get(role)
         if not isinstance(acfg, dict) or not acfg.get("kind"):
             die(f"{p}: agents.{role}.kind is required")
+        where, cli = f"{p}: agents.{role}", CLIS.get(acfg["kind"])
         effort = acfg.get("effort", "")
-        if not isinstance(effort, str):
-            die(f"{p}: agents.{role}.effort must be a string")
-        levels = EFFORTS.get(acfg["kind"], (None, ()))[1]
-        if effort and levels and effort not in levels:
-            die(f"{p}: agents.{role}.effort '{effort}' is not one of {', '.join(levels)} for {acfg['kind']}")
+        if not isinstance(effort, str) or (effort and effort not in EFFORT_LEVELS):
+            hint = f" ('{effort}' is the provider's word; here it is '{PROVIDER_EFFORTS[effort]}')" if (
+                effort in PROVIDER_EFFORTS
+            ) else ""  # fmt: skip
+            die(f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}{hint}")
+        perm = acfg.get("permissions", "")
+        if not isinstance(perm, str) or (perm and perm not in PERMISSION_LEVELS):
+            die(f"{where}.permissions must be one of {', '.join(PERMISSION_LEVELS)}")
+        if role in ROLES and perm not in ROLE_PERMISSIONS:
+            why = f"'{perm}' would stop it at its first prompt" if perm else "it is required"
+            die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(ROLE_PERMISSIONS)}")
+        if cli and perm and perm not in cli["permissions"]:
+            has = ", ".join(cli["permissions"])
+            die(f"{where}.permissions '{perm}' is not available for {acfg['kind']} (it has: {has})")
+        args = acfg.get("args") or []
+        if not isinstance(args, list):
+            die(f"{where}.args must be a list of strings")
+        own = [a for a in args if str(a).startswith(PERMISSION_FLAGS)]
+        if cli and perm and own:
+            die(f"{where}.args sets permissions itself ({own[0]}); `permissions: {perm}` already does, drop the flag")
 
 
 def validate_cfg(raw: dict, p: Path) -> dict:
@@ -260,14 +318,8 @@ def load_cfg(root: Path) -> Config:
 
 def claude_settings(acfg: dict) -> dict:
     """What Claude Code should start with in this repo, read off the orchestrator entry: its model, and the
-    permission mode its args imply (--dangerously-skip-permissions -> bypassPermissions, --permission-mode X -> X)."""
-    args = list(acfg.get("args") or [])
-    mode = "default"
-    if "--dangerously-skip-permissions" in args:
-        mode = "bypassPermissions"
-    elif "--permission-mode" in args and args.index("--permission-mode") + 1 < len(args):
-        mode = args[args.index("--permission-mode") + 1]
-    out: dict = {"permissions": {"defaultMode": mode}}
+    permission mode of its `permissions` level (CLAUDE_MODES; unset = ask = Claude Code's default)."""
+    out: dict = {"permissions": {"defaultMode": CLAUDE_MODES[acfg.get("permissions") or "ask"]}}
     if acfg.get("model"):
         out["model"] = acfg["model"]
     return out
@@ -798,25 +850,28 @@ def agent_name(role: str, slug: str) -> str:
     return f"{ROLES[role]}-{slug}"
 
 
-EFFORTS = {  # how each CLI takes a reasoning effort, and the levels it accepts
-    "claude": (("--effort", "{}"), ("low", "medium", "high", "xhigh", "max")),
-    "codex": (("-c", "model_reasoning_effort={}"), ("minimal", "low", "medium", "high", "xhigh")),
-}
-
-
 def effort_args(kind: str, effort: str) -> list:
-    """The CLI flags for `effort`, empty when the CLI has no such setting (`config` says so)."""
-    if not effort or kind not in EFFORTS:
+    """The CLI flags for one of our effort levels, empty when unset or the CLI is not in CLIS (`config` says so)."""
+    cli = CLIS.get(kind)
+    if not effort or not cli:
         return []
-    return [part.format(effort) for part in EFFORTS[kind][0]]
+    return [part.format(cli["efforts"][effort]) for part in cli["effort"]]
+
+
+def permission_args(kind: str, permissions: str) -> list:
+    """The CLI flags for one of our permission levels; empty when unset (the CLI's default) or not translated."""
+    cli = CLIS.get(kind)
+    return list(cli["permissions"].get(permissions, [])) if cli and permissions else []
 
 
 def agent_cli_args(a: dict, repo: Path) -> list:
-    """The CLI flags after `--`; `{repo}` in an arg becomes the main checkout's absolute path."""
+    """The CLI flags after `--`: model, effort, permissions, then `args` verbatim. `{repo}` in any of them becomes
+    the main checkout's absolute path."""
+    kind = a.get("kind", "")
     model = ["--model", a["model"]] if a.get("model") else []
-    effort = effort_args(a.get("kind", ""), a.get("effort", ""))
-    extra = [str(x).replace("{repo}", str(repo)) for x in a.get("args") or []]
-    return ["--", *model, *effort, *extra] if (model or effort or extra) else []
+    flags = [*effort_args(kind, a.get("effort", "")), *permission_args(kind, a.get("permissions", ""))]
+    flags = [str(x).replace("{repo}", str(repo)) for x in [*flags, *(a.get("args") or [])]]
+    return ["--", *model, *flags] if (model or flags) else []
 
 
 def agent_state(name: str) -> str:
@@ -1601,6 +1656,31 @@ class Doctor:
 
 
 # ----------------------------------------------------------------------------- commands
+def agent_lines(acfg: dict) -> list[str]:
+    """How `config` shows an agent's effort and permissions: our words, then what its CLI is given."""
+    kind, cli = acfg["kind"], CLIS.get(acfg["kind"])
+    effort, perm = acfg.get("effort", ""), acfg.get("permissions", "")
+    if not effort:
+        e = "effort       - (the CLI's default)"
+    elif not cli:
+        e = f"effort       {effort} (not translated for {kind}: put its flag in args)"
+    else:
+        native = cli["efforts"][effort]
+        e = f"effort       {effort}" + (f" ({kind}: {native})" if native != effort else "")
+    if not perm:
+        p = "permissions  - (the CLI's default)"
+    elif not cli:
+        p = f"permissions  {perm} (not translated for {kind}: put its flags in args)"
+    else:
+        flags = " ".join(cli["permissions"][perm]) or "no flag needed"
+        how = f"; {cli['guarded_by']}" if perm == "guarded" and cli.get("guarded_by") else ""
+        p = f"permissions  {perm}: {PERMISSION_WORDS[perm]}{how} ({flags})"
+    lines = [e, p]
+    if acfg.get("args"):
+        lines.append("args         " + " ".join(str(x) for x in acfg["args"]))
+    return lines
+
+
 def cmd_config(a):
     """The setup the next feature would run with, for the orchestrator to show the human before `start`."""
     root = main_checkout(repo_root())
@@ -1616,13 +1696,13 @@ def cmd_config(a):
     print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
     for role in (*ROLES, "orchestrator"):
         acfg = cfg.agents[role]
-        kind, model, args = acfg["kind"], acfg.get("model") or "(default model)", " ".join(acfg.get("args") or [])
-        effort = acfg.get("effort") or "-"
-        if acfg.get("effort") and kind not in EFFORTS:
-            effort += " (ignored: no effort setting for this CLI)"
-        missing = "" if shutil.which(kind) else "   <- not in PATH"
+        kind, model = acfg["kind"], acfg.get("model") or "(default model)"
+        missing = "   <- not in PATH" if not shutil.which(kind) else ""
         note = "   (only used by start --detach)" if role == "orchestrator" else ""
-        print(f"  {role:<18} {kind:<7} {model:<28} effort {effort:<7} {args}{missing}{note}")
+        print(f"  {role:<18} {kind:<7} {model}{missing}{note}")
+        for line in agent_lines(acfg):
+            print(f"  {'':<18} {line}")
+    print("  effort: " + " < ".join(EFFORT_LEVELS) + "   permissions: " + ", ".join(PERMISSION_LEVELS))
     print(write_local_settings(root, cfg) if a.apply else settings_report(root, cfg))
     print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
     return 0

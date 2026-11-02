@@ -51,7 +51,10 @@ src/m.py
 ## Open questions
 {questions}
 """
-AGENTS = {r: {"kind": "claude"} for r in ("orchestrator", "spec_author", "implementer", "reviewer")}
+AGENTS = {
+    "orchestrator": {"kind": "claude"},
+    **{r: {"kind": "claude", "permissions": "full"} for r in ("spec_author", "implementer", "reviewer")},
+}
 
 
 class Repo:
@@ -346,6 +349,43 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(h.state_text("blocked", "", gates), "blocked · needs you")
         self.assertEqual(h.state_text("done", "", gates), "done")
 
+    def test_effort_levels_per_cli(self):
+        native = {
+            "claude": ["low", "medium", "high", "xhigh", "max"],
+            "codex": ["low", "medium", "high", "xhigh", "xhigh"],  # codex has nothing above xhigh
+            "pi": ["low", "medium", "high", "xhigh", "max"],
+        }
+        flag = {"claude": ["--effort", "{}"], "codex": ["-c", "model_reasoning_effort={}"], "pi": ["--thinking", "{}"]}
+        for kind, values in native.items():
+            for ours, theirs in zip(h.EFFORT_LEVELS, values):
+                want = [part.format(theirs) for part in flag[kind]]
+                self.assertEqual(h.effort_args(kind, ours), want, (kind, ours))
+        self.assertEqual(h.effort_args("claude", ""), [])
+
+    def test_permission_levels_per_cli(self):
+        repo = Path("/r")
+        cases = {
+            ("claude", "ask"): ["--permission-mode", "manual"],
+            ("claude", "edits"): ["--permission-mode", "acceptEdits"],
+            ("claude", "guarded"): ["--permission-mode", "auto"],
+            ("claude", "full"): ["--dangerously-skip-permissions"],
+            ("codex", "ask"): ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+            ("codex", "guarded"): [
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "--add-dir",
+                "/r/.git",
+            ],
+            ("codex", "full"): ["--dangerously-bypass-approvals-and-sandbox"],
+        }
+        for (kind, level), flags in cases.items():
+            self.assertEqual(
+                h.agent_cli_args({"kind": kind, "permissions": level}, repo), ["--", *flags], (kind, level)
+            )
+        self.assertEqual(h.agent_cli_args({"kind": "pi", "permissions": "full"}, repo), [], "pi never asks: no flag")
+
     def test_patterns_args_prompt(self):
         self.assertTrue(h.valid_pattern(".env"))
         self.assertTrue(h.valid_pattern("data/*.db"))
@@ -354,12 +394,23 @@ class PureFunctions(unittest.TestCase):
         repo = Path("/r")
         self.assertEqual(h.agent_cli_args({"kind": "claude"}, repo), [])
         self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}, repo), ["--", "--model", "m", "-x"])
-        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}, repo), ["--", "--effort", "xhigh"])
+        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "extra"}, repo), ["--", "--effort", "xhigh"])
         self.assertEqual(
-            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}, repo),
-            ["--", "--model", "g", "-c", "model_reasoning_effort=high", "-y"],
+            h.agent_cli_args(
+                {"kind": "codex", "model": "g", "effort": "high", "permissions": "full", "args": ["-y"]}, repo
+            ),
+            [
+                "--",
+                "--model",
+                "g",
+                "-c",
+                "model_reasoning_effort=high",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-y",
+            ],
+            "model, effort, permissions, then args",
         )
-        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}, repo), [], "no effort setting for pi")
+        self.assertEqual(h.agent_cli_args({"kind": "gemini", "effort": "high", "permissions": "full"}, repo), [])
         self.assertEqual(
             h.agent_cli_args({"args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}, repo),
             ["--", "--add-dir", "/r/.git", "-c", "x={a}"],
@@ -376,17 +427,14 @@ class ConfigTests(Case):
     def test_claude_settings_from_the_orchestrator_entry(self):
         self.assertEqual(h.claude_settings({"kind": "claude"}), {"permissions": {"defaultMode": "default"}})
         self.assertEqual(
-            h.claude_settings({"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}),
+            h.claude_settings({"kind": "claude", "model": "m", "permissions": "full"}),
             {"permissions": {"defaultMode": "bypassPermissions"}, "model": "m"},
         )
-        self.assertEqual(
-            h.claude_settings({"kind": "claude", "args": ["--permission-mode", "plan"]})["permissions"],
-            {"defaultMode": "plan"},
-        )
-        self.assertEqual(
-            h.claude_settings({"kind": "claude", "args": ["--permission-mode"]})["permissions"],
-            {"defaultMode": "default"},
-        )
+        modes = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
+        for level, mode in modes.items():
+            self.assertEqual(
+                h.claude_settings({"kind": "claude", "permissions": level})["permissions"]["defaultMode"], mode
+            )
 
     def test_write_local_settings(self):
         p = self.r.root / ".claude" / "settings.local.json"
@@ -395,7 +443,7 @@ class ConfigTests(Case):
         self.r.write_cfg(
             agents={
                 **AGENTS,
-                "orchestrator": {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]},
+                "orchestrator": {"kind": "claude", "model": "m", "permissions": "full"},
             }
         )
         line = h.write_local_settings(self.r.root, self.r.cfg())
@@ -435,21 +483,6 @@ class ConfigTests(Case):
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "max_review_rounds": -1},
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "max_review_rounds": True},
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "teardown_cmd": 1},
-            {
-                "base_branch": "main",
-                "test_cmd": "true",
-                "agents": {**AGENTS, "reviewer": {"kind": "claude", "effort": "turbo"}},
-            },
-            {
-                "base_branch": "main",
-                "test_cmd": "true",
-                "agents": {**AGENTS, "reviewer": {"kind": "codex", "effort": "max"}},
-            },
-            {
-                "base_branch": "main",
-                "test_cmd": "true",
-                "agents": {**AGENTS, "reviewer": {"kind": "claude", "effort": 3}},
-            },
         ]
         for raw in bad:
             (self.r.root / "harness" / "config.json").write_text(json.dumps(raw))
@@ -458,6 +491,42 @@ class ConfigTests(Case):
         (self.r.root / "harness" / "config.json").write_text("{")
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             h.load_cfg(self.r.root)
+
+    def test_rejects_agents_outside_the_vocabulary(self):
+        full = {"kind": "claude", "permissions": "full"}
+        bad = {
+            "effort 'turbo' is not ours": (
+                {"reviewer": {**full, "effort": "turbo"}},
+                "effort must be one of low, medium",
+            ),
+            "a provider word": ({"reviewer": {**full, "effort": "xhigh"}}, "here it is 'extra'"),
+            "effort as a number": ({"reviewer": {**full, "effort": 3}}, "effort must be one of"),
+            "unknown permissions": (
+                {"reviewer": {"kind": "claude", "permissions": "yolo"}},
+                "must be one of ask, edits",
+            ),
+            "a role that would ask": ({"reviewer": {"kind": "claude", "permissions": "ask"}}, "first prompt"),
+            "a role without permissions": ({"reviewer": {"kind": "claude"}}, "it is required"),
+            "pi cannot be guarded": ({"reviewer": {"kind": "pi", "permissions": "guarded"}}, "not available for pi"),
+            "codex has no edits": (
+                {"orchestrator": {"kind": "codex", "permissions": "edits"}},
+                "(it has: ask, guarded",
+            ),
+            "the flag by hand": (
+                {"reviewer": {**full, "args": ["--dangerously-skip-permissions"]}},
+                "args sets permissions itself",
+            ),
+        }
+        for why, (agents, msg) in bad.items():
+            self.r.write_cfg(agents={**AGENTS, **agents})
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+                h.load_cfg(self.r.root)
+            self.assertIn(msg, err.getvalue(), why)
+        self.r.write_cfg(agents={**AGENTS, "reviewer": {"kind": "gemini", "permissions": "full", "args": ["--yolo"]}})
+        self.assertEqual(
+            h.load_cfg(self.r.root).agents["reviewer"]["kind"], "gemini", "an untranslated CLI: flags in args"
+        )
 
     def test_worktreeinclude(self):
         (self.r.root / ".worktreeinclude").write_text("# comment\n\n.env\ndata\n../up\n")
@@ -1101,22 +1170,26 @@ class Commands(Case):
         self.chdir(self.r.wt)  # from a worktree it still shows the main checkout's config
         agents = {
             **AGENTS,
-            "implementer": {"kind": "codex", "effort": "xhigh", "args": ["-x"]},
-            "reviewer": {"kind": "pi", "effort": "high"},
+            "implementer": {"kind": "codex", "effort": "max", "permissions": "guarded", "args": ["-x"]},
+            "reviewer": {"kind": "gemini", "effort": "high", "permissions": "full"},
         }
         self.r.write_cfg(gates={"approve": "auto"}, agents=agents)
         code, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertEqual(code, 0)
         self.assertIn("gates              approve: auto   merge: human", out)
-        self.assertIn("implementer        codex   (default model)              effort xhigh   -x", out)
-        self.assertIn("effort high (ignored: no effort setting for this CLI)", out)
+        self.assertIn("implementer        codex   (default model)", out)
+        self.assertIn("effort       max (codex: xhigh)", out)
+        self.assertIn("permissions  guarded: never asks, the CLI blocks risky actions; its sandbox", out)
+        self.assertIn("args         -x", out)
+        self.assertIn("effort       high (not translated for gemini: put its flag in args)", out)
+        self.assertIn("permissions  full (not translated for gemini: put its flags in args)", out)
         self.assertIn("(only used by start --detach)", out)
         self.assertIn("copy_files         .env", out)
 
     def test_config_shows_and_only_apply_writes_the_settings(self):
         self.chdir(self.r.root)
         p = self.r.root / ".claude" / "settings.local.json"
-        orch = {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}
+        orch = {"kind": "claude", "model": "m", "permissions": "full"}
         self.r.write_cfg(agents={**AGENTS, "orchestrator": orch})
         _, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertFalse(p.exists(), "plain config never writes: raising permissions is the human's call")
@@ -1219,7 +1292,7 @@ class Commands(Case):
 # ----------------------------------------------------------------------------- the herdr adapter, through a fake herdr
 class HerdrAdapter(Case):
     fake_herdr = True
-    ACFG = {"kind": "claude", "model": "m", "effort": "high", "args": ["--dangerously-skip-permissions"]}
+    ACFG = {"kind": "claude", "model": "m", "effort": "high", "permissions": "full"}
 
     def test_prompt_or_start_starts_the_agent_in_its_own_tab(self):
         settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, self.ACFG)
@@ -1453,9 +1526,9 @@ class DoctorChecks(Case):
         self.r.write_cfg(
             agents={
                 "orchestrator": {"kind": "claude", "model": "good"},
-                "spec_author": {"kind": "claude", "model": "good"},
-                "implementer": {"kind": "pi", "model": "x/y"},
-                "reviewer": {"kind": "codex", "model": "bad"},
+                "spec_author": {"kind": "claude", "model": "good", "permissions": "full"},
+                "implementer": {"kind": "pi", "model": "x/y", "permissions": "full"},
+                "reviewer": {"kind": "codex", "model": "bad", "permissions": "guarded"},
             }
         )
         doc = h.Doctor(self.r.root, models=True)
