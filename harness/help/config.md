@@ -1,7 +1,8 @@
 # harness/config.json
 
 The only tool-specific file. JSON cannot hold comments, so this file explains it; the shipped
-`config.json` is the default example (mixed vendors, automatic gates). Unknown keys such as `_help` are
+`config.json` is the safe default (Claude roles, a Codex reviewer, CLI default models, `guarded`, both gates
+`human`); "Fully automatic" below shows the other end. Unknown keys such as `_help` are
 ignored. The launcher validates the file on every command and names the problem;
 `uv run harness/harness.py config` prints the setup in a few lines, which the orchestrator shows you
 before the first feature of a session. The driver (`drive`) is the launcher itself, not an agent: it
@@ -18,7 +19,7 @@ has no model and no cost.
 | `teardown_cmd` | no | shell command or `""` | Run by `merge` in the worktree before removing it: `docker compose down`. |
 | `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
 | `max_role_minutes` | no | integer, default `180`, `0` = no limit | When one role run (prompt to settled) takes longer, the driver stops and prompts the orchestrator ("still working after N min"). The agent keeps running; you decide whether to wait (`drive <slug> --tab` again) or stop it. |
-| `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `auto`. |
+| `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `human`. |
 | `agents.<role>` | yes, all three | object, below | Which agent harness and model run `spec_author`, `implementer` and `reviewer`. Not the orchestrator: that is whichever agent you start in the repo (it reads `AGENTS.md`), with the model and permissions you start it with. |
 
 ## `agents.<role>`
@@ -68,6 +69,19 @@ Ready-to-copy entries:
 { "harness": "claude", "model": "claude-opus-5-5",   "effort": "extra", "permissions": "guarded" }
 { "harness": "codex",  "model": "",                  "effort": "extra", "permissions": "guarded" }
 { "harness": "pi",     "model": "anthropic/claude-sonnet-5-5", "effort": "medium", "permissions": "full" }
+```
+
+## Fully automatic
+Nothing stops for you: the driver approves the spec and merges by itself, and the Claude roles never ask.
+Only on a machine you would not mind an agent breaking, and nobody reads the spec or the code before it
+lands on the base branch (`harness/docs/sdd.md` §9). Replace `gates` and `agents` with:
+```json
+"gates": { "approve": "auto", "merge": "auto" },
+"agents": {
+  "spec_author": { "harness": "claude", "model": "claude-fable-5-1", "effort": "extra", "permissions": "full" },
+  "implementer": { "harness": "claude", "model": "claude-opus-5-5",  "effort": "high",  "permissions": "full" },
+  "reviewer":    { "harness": "codex",  "model": "gpt-6-astra",      "effort": "extra", "permissions": "guarded" }
+}
 ```
 
 ## herdr's sidebar

@@ -17,6 +17,13 @@ work), run `config` again, show it, and once they confirm, commit it on the base
 `chore: harness config <what changed>`. Show the setup again whenever `harness/config.json` changed
 since you last showed it.
 
+When `doctor` notes that `AGENTS.md` §1 is not filled in, settle it in the same step, one confirmation:
+- With project code: draft §1 from the code (manifest, layout, lint and format config) and show it.
+- Without project code (`doctor`: "no project code yet"): ask what the project is and which stack, draft
+  §1, and propose `test_cmd` and `setup_cmd` for that stack when the shipped ones do not fit.
+- After the human's yes: write `AGENTS.md` §1 (and `harness/config.json` if it changed) and commit on the
+  base branch as `chore: project section`. Same lane as a config tweak: no feature, no worktree.
+
 ## A feature request
 1. `uv run harness/harness.py start <slug> "<what it must do>"`. Slug: short, lowercase, dashes. Ask
    first if the intent is unclear.

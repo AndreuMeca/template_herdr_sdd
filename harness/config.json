@@ -10,25 +10,25 @@
   "max_review_rounds": 3,
   "max_role_minutes": 180,
   "gates": {
-    "approve": "auto",
-    "merge": "auto"
+    "approve": "human",
+    "merge": "human"
   },
   "agents": {
     "spec_author": {
       "harness": "claude",
-      "model": "claude-fable-5-1",
+      "model": "",
       "effort": "extra",
-      "permissions": "full"
+      "permissions": "guarded"
     },
     "implementer": {
       "harness": "claude",
-      "model": "claude-opus-5-5",
+      "model": "",
       "effort": "high",
-      "permissions": "full"
+      "permissions": "guarded"
     },
     "reviewer": {
       "harness": "codex",
-      "model": "gpt-6-astra",
+      "model": "",
       "effort": "extra",
       "permissions": "guarded"
     }
