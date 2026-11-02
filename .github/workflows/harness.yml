@@ -1,0 +1,35 @@
+# The launcher's own tests and lint. Runs only when the harness changes, so a project's own CI stays its own.
+name: harness
+
+on:
+  push:
+    paths: ["harness/**", ".github/workflows/harness.yml"]
+  pull_request:
+    paths: ["harness/**", ".github/workflows/harness.yml"]
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }  # the oldest Python harness/ruff.toml targets
+          - { os: macos-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python harness/selftest.py -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff==0.17.3
+      - run: ruff check --config harness/ruff.toml harness/
+      - run: ruff format --check --config harness/ruff.toml harness/
