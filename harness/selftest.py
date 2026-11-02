@@ -1439,6 +1439,40 @@ class DoctorChecks(Case):
         _, out = self.output(doc.baseline, self.r.cfg())
         self.assertIn("ok    test_cmd green on the main checkout (true)", out)
 
+    def test_models_probe_each_cli_and_model_once(self):
+        bindir, log = self.r.tmp / "bin", self.r.tmp / "probes.log"
+        bindir.mkdir()
+        fake = (
+            f'#!/bin/sh\necho "$(basename "$0") $*" >> {log}\n'
+            'case "$*" in *bad*) echo "unknown model" >&2; exit 1;; esac\necho OK\n'
+        )
+        for cli in ("claude", "codex"):
+            (bindir / cli).write_text(fake)
+            (bindir / cli).chmod(0o755)
+        self.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        self.r.write_cfg(
+            agents={
+                "orchestrator": {"kind": "claude", "model": "good"},
+                "spec_author": {"kind": "claude", "model": "good"},
+                "implementer": {"kind": "pi", "model": "x/y"},
+                "reviewer": {"kind": "codex", "model": "bad"},
+            }
+        )
+        doc = h.Doctor(self.r.root, models=True)
+        _, out = self.output(doc.models_check, self.r.cfg())
+        self.assertIn("ok    spec_author: claude answers with model good", out)
+        self.assertIn("ok    orchestrator: claude answers with model good", out)
+        self.assertIn("FAIL  reviewer: codex answers with model bad", out)
+        self.assertIn("unknown model", out)
+        self.assertIn("implementer: pi model not checked", doc.notes)
+        probes = log.read_text().splitlines()
+        self.assertEqual(len(probes), 2, "one probe per (CLI, model) pair")
+        self.assertIn("codex exec -m bad --skip-git-repo-check Reply with the word OK.", probes)
+        doc = h.Doctor(self.r.root)  # without --models nothing is probed
+        doc.herdr_state = lambda: None
+        self.stub("probe_model", lambda *a: self.fail("probed without --models"))
+        self.output(doc.run)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], *sys.argv[1:]])

@@ -20,7 +20,8 @@ every agent reads; the rest of the repo is your project.
 4. Add your code outside `harness/`, commit, open the repo in herdr, start your agent and ask for a
    feature. `uv run harness/harness.py doctor` checks tools and config and runs `test_cmd` on the main
    checkout: get it all green before the first feature, or the first implementer gets blamed for a red
-   baseline (`--no-tests` skips that run). The Claude you open in this
+   baseline (`--no-tests` skips that run). `doctor --models` also sends each Claude Code and Codex role
+   one tiny prompt with its model, so a wrong model id fails there (a few tokens). The Claude you open in this
    repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `config
    --apply` writes them to `.claude/settings.local.json` (per machine, not committed), so with
    `--dangerously-skip-permissions` in its args the orchestrator never stops to ask (accept Claude

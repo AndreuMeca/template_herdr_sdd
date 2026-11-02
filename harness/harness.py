@@ -1425,6 +1425,26 @@ class Driver:
 
 
 # ----------------------------------------------------------------------------- doctor
+MODEL_PROBES = {  # a one-shot, non-interactive prompt per CLI, for `doctor --models`
+    "claude": lambda model, prompt: ["claude", "-p", "--model", model, prompt],
+    "codex": lambda model, prompt: ["codex", "exec", "-m", model, "--skip-git-repo-check", prompt],
+}
+
+
+def probe_model(kind: str, model: str, cwd: Path, timeout_s: int = 120) -> tuple[bool, str]:
+    """(answered, output tail) of one tiny prompt to the CLI with this model."""
+    try:
+        p = subprocess.run(
+            MODEL_PROBES[kind](model, "Reply with the word OK."),
+            cwd=cwd, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout_s,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        return False, f"no answer within {timeout_s} s"
+    except OSError as e:
+        return False, str(e)
+    return p.returncode == 0, (p.stdout + p.stderr).strip()[-1500:]
+
+
 class Doctor:
     """Tools, config and leftovers of the repo at `root` (its main checkout). `run()` prints the report."""
 
@@ -1447,6 +1467,8 @@ class Doctor:
         self.check(True, "harness/config.json is valid")
         self.config(cfg)
         self.baseline(cfg)
+        if self.models:
+            self.models_check(cfg)
         self.git_leftovers(cfg.base_branch)
         if shutil.which("herdr") is not None:
             self.herdr_state()
@@ -1489,6 +1511,21 @@ class Doctor:
         self.check(code == 0, f"test_cmd green on the main checkout ({cfg.test_cmd})", fix)
         if code != 0:
             print("\n".join("      | " + line for line in out.splitlines()[-15:]))
+
+    def models_check(self, cfg: Config):
+        """`--models`: one tiny prompt per (CLI, model) pair, so a wrong model id fails here, not mid-feature."""
+        seen: dict[tuple, bool] = {}
+        for role in (*ROLES, "orchestrator"):
+            acfg = cfg.agents[role]
+            kind, model = acfg["kind"], acfg.get("model") or ""
+            if kind not in MODEL_PROBES or not model:
+                self.notes.append(f"{role}: {kind} model {'not checked' if model else 'is the CLI default'}")
+                continue
+            if (kind, model) not in seen:
+                seen[(kind, model)], out = probe_model(kind, model, self.root)
+                if not seen[(kind, model)]:
+                    print("\n".join("      | " + line for line in out.splitlines()[-8:]))
+            self.check(seen[(kind, model)], f"{role}: {kind} answers with model {model}", f"check agents.{role}.model")
 
     def git_leftovers(self, base: str):
         root = self.root
