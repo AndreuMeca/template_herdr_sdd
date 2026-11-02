@@ -54,6 +54,9 @@ DONE_WHEN = {  # on-disk evidence that a role finished its job
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
 TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
+# sdd §3: WHILE/WHEN/WHERE clauses (combinable), an optional `IF ..., THEN`, then `THE <subject> SHALL <response>`
+EARS_RE = re.compile(r"^(?:(?:WHILE|WHEN|WHERE) .+?, )*(?:IF .+?, THEN )?THE \S.*? SHALL \S")
+EARS_HINT = "THE ... SHALL / WHEN|WHILE|WHERE ..., THE ... SHALL / IF ..., THEN THE ... SHALL"
 # the example placeholders of harness/features/_template/: a requirement or task still holding one was never written
 TEMPLATE_PLACEHOLDERS = ("<trigger>", "<response>", "<unwanted condition>", "<task>")
 EXIT_DONE, EXIT_ERROR, EXIT_ATTENTION, EXIT_WORKING = 0, 1, 2, 3
@@ -943,7 +946,14 @@ def spec_errors(slug: str, text: str, st: str) -> tuple[list[str], dict, dict]:
     active = {k: v for k, v in reqs.items() if v.rstrip(".").strip().lower() != "withdrawn"}
     if not active:
         errs.append(f"{slug}: no active requirement line '- R<n>: ... SHALL ...' under ## Requirements")
-    errs += [f"{slug}: {k} has no SHALL" for k, v in active.items() if "SHALL" not in v]
+    for k, v in active.items():
+        shalls = len(re.findall(r"\bSHALL\b", v))
+        if shalls == 0:
+            errs.append(f"{slug}: {k} has no SHALL")
+        elif shalls > 1:
+            errs.append(f"{slug}: {k} has {shalls} SHALLs; one per requirement")
+        elif not EARS_RE.match(v):
+            errs.append(f"{slug}: {k} follows no EARS pattern ({EARS_HINT})")
     errs += placeholder_errors(slug, active.items())
     if st != "blocked" and any(line.strip() for line in section(text, "Open questions")):
         errs.append(f"{slug}: ## Open questions is not empty (answer them or set status blocked)")

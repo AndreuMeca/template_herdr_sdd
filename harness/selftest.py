@@ -594,6 +594,35 @@ class CheckRules(Case):
         self.r.spec("spec_ready", reqs="- R1: withdrawn")
         self.assertIn("feat: no active requirement line '- R<n>: ... SHALL ...' under ## Requirements", self.r.check())
 
+    def test_rule_2_ears(self):
+        good = [
+            "THE SYSTEM SHALL log every request.",
+            "WHEN a user logs in, THE SYSTEM SHALL set a cookie.",
+            "WHILE offline, THE SYSTEM SHALL queue writes.",
+            "WHERE dark mode is enabled, THE SYSTEM SHALL use the dark palette.",
+            "IF the token is expired, THEN THE SYSTEM SHALL return 401.",
+            "WHILE offline, WHEN a write arrives, THE SYSTEM SHALL queue it.",
+            "WHEN a, b, or c happens, THE API SHALL return 200 within 2 s.",
+        ]
+        bad = {
+            "WHEN x, THE SYSTEM SHALL y and SHALL z.": "has 2 SHALLs; one per requirement",
+            "IF x, THE SYSTEM SHALL y.": "follows no EARS pattern",
+            "SHALL return 1.": "follows no EARS pattern",
+            "The system SHALL return 1.": "follows no EARS pattern",
+            "The system shall return 1.": "has no SHALL",
+        }
+        lines = [f"- R{i}: {t}" for i, t in enumerate([*good, *bad], 1)]
+        self.r.spec("spec_ready", reqs="\n".join(lines))
+        self.r.tasks(f"- [ ] T1: all ({', '.join(f'R{i}' for i in range(1, len(lines) + 1))})")
+        errs = self.r.check()
+        for i, (text, why) in enumerate(bad.items(), len(good) + 1):
+            self.assertTrue(any(e.startswith(f"feat: R{i} {why}") for e in errs), (text, errs))
+        self.assertEqual(len(errs), len(bad), errs)
+
+    def test_fixture_requirements_are_ears(self):
+        for text in (R1, "- R2: THE SYSTEM SHALL z."):
+            self.assertTrue(h.EARS_RE.match(h.REQ_RE.match(text)[2]), text)
+
     def test_rule_3(self):
         self.r.spec("spec_ready", reqs=R1 + "\n- R2: THE SYSTEM SHALL z.")
         self.r.tasks("- [ ] T1: a (R1, R9)\n- [ ] T2: b")

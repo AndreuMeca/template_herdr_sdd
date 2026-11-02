@@ -50,6 +50,8 @@ the current code.
 - Each active R has exactly one `SHALL` and one pattern:
   `THE SYSTEM SHALL <response>.` · `WHEN <trigger>, THE SYSTEM SHALL ...` · `WHILE <state>, THE SYSTEM SHALL ...` ·
   `WHERE <feature is enabled>, THE SYSTEM SHALL ...` · `IF <condition>, THEN THE SYSTEM SHALL ...`
+  `THE SYSTEM` may name the component instead (`THE API SHALL`), in capitals like the keywords; `WHILE`,
+  `WHEN` and `WHERE` clauses may combine before it (`WHILE offline, WHEN a write arrives, THE SYSTEM SHALL ...`).
 - Observable behaviour with concrete values (`returns 404`, `within 2 s`), *what* not *how*, no soft
   verbs (`should`, `may`, `try to`).
 - `## Open questions` is empty at `spec_ready`; a question the intent and the code cannot answer is
@@ -89,7 +91,7 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 | # | rule | from status |
 |---|---|---|
 | 1 | `status` in `spec.md` is one of the lifecycle table | always |
-| 2 | at least one active R, ids unique, each with `SHALL` and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
+| 2 | at least one active R, ids unique, each with exactly one `SHALL` in an EARS pattern (§3) and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
 | 3 | every task cites an existing R and keeps no template placeholder (`<task>`); every active R is cited by a task | `spec_ready` |
 | 4 | every active R has its `<slug>:R<n>` token outside `harness/` (`git grep --untracked`) | `review` |
 | 5 | every task ticked and `log.md` exists | `review` |
