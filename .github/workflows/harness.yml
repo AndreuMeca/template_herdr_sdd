@@ -17,19 +17,15 @@ jobs:
           - { os: macos-latest, python: "3.13" }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python harness/selftest.py -v
+      - uses: actions/checkout@v5
+      # uv installs any CPython on any runner image (setup-python has no 3.9 for the newest Ubuntu)
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --no-project --python ${{ matrix.python }} python harness/selftest.py -v
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install ruff==0.17.3
-      - run: ruff check --config harness/ruff.toml harness/
-      - run: ruff format --check --config harness/ruff.toml harness/
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.17.3 check --config harness/ruff.toml harness/
+      - run: uvx ruff@0.17.3 format --check --config harness/ruff.toml harness/
