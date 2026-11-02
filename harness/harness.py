@@ -82,33 +82,67 @@ PERMISSION_WORDS = {
 CLAUDE_MODES = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
 PROVIDER_EFFORTS = {"minimal": "low", "xhigh": "extra"}  # provider words people may type, and ours
 PERMISSION_FLAGS = ("--dangerously-", "--permission-mode", "--sandbox", "--ask-for-approval", "--yolo")
+
+
+@dataclass(frozen=True)
+class Cli:
+    """Everything the launcher knows about one agent CLI: how it takes our effort and permission words, how
+    `doctor --models` asks it one question, and which startup dialogs it may show that are safe to accept.
+    Adding a CLI is adding one entry to CLIS (and one column to the tables in harness/help/config.md)."""
+
+    effort_flag: tuple  # the flag(s) for a reasoning effort, "{}" standing for the CLI's own level
+    efforts: dict  # our effort level -> the CLI's
+    permissions: dict  # our permission level -> the CLI's flags; a level missing here is one the CLI lacks
+    guarded_by: str = ""  # what limits the agent under `guarded`, for `config` to say
+    probe: tuple = ()  # a one-shot command for `doctor --models`; "{model}" and "{prompt}" are filled in
+    startup_dialogs: tuple = ()  # screen text of first-run dialogs the launcher accepts (option below the default)
+
+    def effort_args(self, level: str) -> list:
+        """The flags for one of our effort levels; empty when unset (the CLI's default)."""
+        return [part.format(self.efforts[level]) for part in self.effort_flag] if level else []
+
+    def permission_args(self, level: str) -> list:
+        """The flags for one of our permission levels; empty when unset (the CLI's default)."""
+        return list(self.permissions.get(level, [])) if level else []
+
+    def probe_cmd(self, model: str, prompt: str) -> list:
+        return [part.format(model=model, prompt=prompt) for part in self.probe]
+
+    def shows_startup_dialog(self, screen_text: str) -> bool:
+        return any(text in screen_text for text in self.startup_dialogs)
+
+
+SAME_EFFORTS = {"low": "low", "medium": "medium", "high": "high"}
 CLIS = {
-    "claude": {
-        "effort": ("--effort", "{}"),
-        "efforts": {"low": "low", "medium": "medium", "high": "high", "extra": "xhigh", "max": "max"},
-        "permissions": {
+    "claude": Cli(
+        effort_flag=("--effort", "{}"),
+        efforts={**SAME_EFFORTS, "extra": "xhigh", "max": "max"},
+        permissions={
             "ask": ["--permission-mode", "manual"],
             "edits": ["--permission-mode", "acceptEdits"],
             "guarded": ["--permission-mode", "auto"],
             "full": ["--dangerously-skip-permissions"],
         },
-        "guarded_by": "auto mode's classifier",
-    },
-    "codex": {
-        "effort": ("-c", "model_reasoning_effort={}"),
-        "efforts": {"low": "low", "medium": "medium", "high": "high", "extra": "xhigh", "max": "xhigh"},
-        "permissions": {
+        guarded_by="auto mode's classifier",
+        probe=("claude", "-p", "--model", "{model}", "{prompt}"),
+        startup_dialogs=("trust this folder", "Bypass Permissions mode", "Yes, I accept"),
+    ),
+    "codex": Cli(
+        effort_flag=("-c", "model_reasoning_effort={}"),
+        efforts={**SAME_EFFORTS, "extra": "xhigh", "max": "xhigh"},  # codex has nothing above xhigh
+        permissions={
             "ask": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
             "guarded": ["--sandbox", "workspace-write", "--ask-for-approval", "never", "--add-dir", "{repo}/.git"],
             "full": ["--dangerously-bypass-approvals-and-sandbox"],
         },
-        "guarded_by": "its sandbox: writes only in the worktree",
-    },
-    "pi": {  # pi has no permission modes: it never asks
-        "effort": ("--thinking", "{}"),
-        "efforts": {"low": "low", "medium": "medium", "high": "high", "extra": "xhigh", "max": "max"},
-        "permissions": {"full": []},
-    },
+        guarded_by="its sandbox: writes only in the worktree",
+        probe=("codex", "exec", "-m", "{model}", "--skip-git-repo-check", "{prompt}"),
+    ),
+    "pi": Cli(
+        effort_flag=("--thinking", "{}"),
+        efforts={**SAME_EFFORTS, "extra": "xhigh", "max": "max"},
+        permissions={"full": []},  # pi has no permission modes: it never asks
+    ),
 }
 SIDEBAR_ROWS = '[ui.sidebar.spaces]\nrows = [["state_icon", "workspace"], ["branch", "git_status"], ["$harness"]]'
 
@@ -259,8 +293,8 @@ def validate_agents(agents: dict, p: Path):
         if role in ROLES and perm not in ROLE_PERMISSIONS:
             why = f"'{perm}' would stop it at its first prompt" if perm else "it is required"
             die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(ROLE_PERMISSIONS)}")
-        if cli and perm and perm not in cli["permissions"]:
-            has = ", ".join(cli["permissions"])
+        if cli and perm and perm not in cli.permissions:
+            has = ", ".join(cli.permissions)
             die(f"{where}.permissions '{perm}' is not available for {acfg['kind']} (it has: {has})")
         args = acfg.get("args") or []
         if not isinstance(args, list):
@@ -850,26 +884,13 @@ def agent_name(role: str, slug: str) -> str:
     return f"{ROLES[role]}-{slug}"
 
 
-def effort_args(kind: str, effort: str) -> list:
-    """The CLI flags for one of our effort levels, empty when unset or the CLI is not in CLIS (`config` says so)."""
-    cli = CLIS.get(kind)
-    if not effort or not cli:
-        return []
-    return [part.format(cli["efforts"][effort]) for part in cli["effort"]]
-
-
-def permission_args(kind: str, permissions: str) -> list:
-    """The CLI flags for one of our permission levels; empty when unset (the CLI's default) or not translated."""
-    cli = CLIS.get(kind)
-    return list(cli["permissions"].get(permissions, [])) if cli and permissions else []
-
-
 def agent_cli_args(a: dict, repo: Path) -> list:
-    """The CLI flags after `--`: model, effort, permissions, then `args` verbatim. `{repo}` in any of them becomes
-    the main checkout's absolute path."""
-    kind = a.get("kind", "")
+    """The CLI flags after `--`: model, effort, permissions (translated by the CLI's entry in CLIS; a CLI not in it
+    gets neither, `config` says so), then `args` verbatim. `{repo}` in any of them becomes the main checkout's
+    absolute path."""
+    cli = CLIS.get(a.get("kind", ""))
     model = ["--model", a["model"]] if a.get("model") else []
-    flags = [*effort_args(kind, a.get("effort", "")), *permission_args(kind, a.get("permissions", ""))]
+    flags = [*cli.effort_args(a.get("effort", "")), *cli.permission_args(a.get("permissions", ""))] if cli else []
     flags = [str(x).replace("{repo}", str(repo)) for x in [*flags, *(a.get("args") or [])]]
     return ["--", *model, *flags] if (model or flags) else []
 
@@ -901,9 +922,11 @@ def screen(name: str, lines: int = 40) -> str:
         return ""
 
 
-def settle_startup(name: str, timeout_s: int = 60) -> bool:
-    """Answer the known Claude Code startup dialogs (trust folder, bypass-permissions warning) and wait for idle.
-    Returns True when the agent is ready for prompts, False when it is still blocked on something else."""
+def settle_startup(name: str, kind: str, timeout_s: int = 60) -> bool:
+    """Answer the startup dialogs its CLI is known to show (Cli.startup_dialogs: Claude Code's trust-folder and
+    bypass-permissions warnings) and wait for idle. Returns True when the agent is ready for prompts, False when it
+    is still blocked on something else."""
+    cli = CLIS.get(kind)
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         state = agent_state(name)
@@ -911,8 +934,8 @@ def settle_startup(name: str, timeout_s: int = 60) -> bool:
             return True
         if state == "blocked":
             text = screen(name)
-            if "trust this folder" in text or "Bypass Permissions mode" in text or "Yes, I accept" in text:
-                # both dialogs default to "No, exit"; the accepting option is the next one down
+            if cli and cli.shows_startup_dialog(text):
+                # such dialogs default to "No, exit"; the accepting option is the next one down
                 herdr("agent", "send-keys", name, "down")
                 herdr("agent", "send-keys", name, "enter")
                 time.sleep(2)
@@ -968,7 +991,7 @@ def prompt_or_start(
                 )
                 if not start_agent(name, acfg, pane_id, main_checkout(root)):
                     raise
-                if not settle_startup(name):
+                if not settle_startup(name, acfg["kind"]):
                     return True, "blocked at startup"
                 continue
             if e.code == "timeout":
@@ -1480,17 +1503,11 @@ class Driver:
 
 
 # ----------------------------------------------------------------------------- doctor
-MODEL_PROBES = {  # a one-shot, non-interactive prompt per CLI, for `doctor --models`
-    "claude": lambda model, prompt: ["claude", "-p", "--model", model, prompt],
-    "codex": lambda model, prompt: ["codex", "exec", "-m", model, "--skip-git-repo-check", prompt],
-}
-
-
-def probe_model(kind: str, model: str, cwd: Path, timeout_s: int = 120) -> tuple[bool, str]:
+def probe_model(cli: Cli, model: str, cwd: Path, timeout_s: int = 120) -> tuple[bool, str]:
     """(answered, output tail) of one tiny prompt to the CLI with this model."""
     try:
         p = subprocess.run(
-            MODEL_PROBES[kind](model, "Reply with the word OK."),
+            cli.probe_cmd(model, "Reply with the word OK."),
             cwd=cwd, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout_s,
         )  # fmt: skip
     except subprocess.TimeoutExpired:
@@ -1572,12 +1589,12 @@ class Doctor:
         seen: dict[tuple, bool] = {}
         for role in (*ROLES, "orchestrator"):
             acfg = cfg.agents[role]
-            kind, model = acfg["kind"], acfg.get("model") or ""
-            if kind not in MODEL_PROBES or not model:
+            kind, model, cli = acfg["kind"], acfg.get("model") or "", CLIS.get(acfg["kind"])
+            if not (cli and cli.probe) or not model:
                 self.notes.append(f"{role}: {kind} model {'not checked' if model else 'is the CLI default'}")
                 continue
             if (kind, model) not in seen:
-                seen[(kind, model)], out = probe_model(kind, model, self.root)
+                seen[(kind, model)], out = probe_model(cli, model, self.root)
                 if not seen[(kind, model)]:
                     print("\n".join("      | " + line for line in out.splitlines()[-8:]))
             self.check(seen[(kind, model)], f"{role}: {kind} answers with model {model}", f"check agents.{role}.model")
@@ -1665,15 +1682,15 @@ def agent_lines(acfg: dict) -> list[str]:
     elif not cli:
         e = f"effort       {effort} (not translated for {kind}: put its flag in args)"
     else:
-        native = cli["efforts"][effort]
+        native = cli.efforts[effort]
         e = f"effort       {effort}" + (f" ({kind}: {native})" if native != effort else "")
     if not perm:
         p = "permissions  - (the CLI's default)"
     elif not cli:
         p = f"permissions  {perm} (not translated for {kind}: put its flags in args)"
     else:
-        flags = " ".join(cli["permissions"][perm]) or "no flag needed"
-        how = f"; {cli['guarded_by']}" if perm == "guarded" and cli.get("guarded_by") else ""
+        flags = " ".join(cli.permissions[perm]) or "no flag needed"
+        how = f"; {cli.guarded_by}" if perm == "guarded" and cli.guarded_by else ""
         p = f"permissions  {perm}: {PERMISSION_WORDS[perm]}{how} ({flags})"
     lines = [e, p]
     if acfg.get("args"):
@@ -1839,7 +1856,7 @@ def start_detached(root: Path, cfg: Config, slug: str, res: dict):
             herdr("tab", "rename", tab_id, "orchestrator")
     text = f"Read harness/roles/orchestrator.md and follow it for harness/features/{slug}/."
     started = start_agent(slug, acfg, pane_id, root, tries=3)
-    if started and not settle_startup(slug):
+    if started and not settle_startup(slug, acfg["kind"]):
         print(
             "warning: the orchestrator is blocked on a dialog; look at it: "
             f"herdr agent read {slug} --source visible --lines 40"

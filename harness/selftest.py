@@ -359,8 +359,8 @@ class PureFunctions(unittest.TestCase):
         for kind, values in native.items():
             for ours, theirs in zip(h.EFFORT_LEVELS, values):
                 want = [part.format(theirs) for part in flag[kind]]
-                self.assertEqual(h.effort_args(kind, ours), want, (kind, ours))
-        self.assertEqual(h.effort_args("claude", ""), [])
+                self.assertEqual(h.CLIS[kind].effort_args(ours), want, (kind, ours))
+        self.assertEqual(h.CLIS["claude"].effort_args(""), [])
 
     def test_permission_levels_per_cli(self):
         repo = Path("/r")
@@ -1345,6 +1345,12 @@ class HerdrAdapter(Case):
         self.save_state()
         settled, note = h.prompt_or_start(self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, self.ACFG)
         self.assertEqual((settled, note), (True, "blocked at startup"))
+        self.state.update(screen="Do you trust this folder? (y/n)", agents={})
+        self.save_state()
+        codex = {"kind": "codex", "permissions": "full"}
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, codex)
+        self.assertEqual(note, "blocked at startup", "a dialog is answered only for the CLI known to show it")
+        self.assertEqual(len(self.calls("agent", "send-keys")), 2)
 
     def test_prompt_outcomes_for_an_existing_agent(self):
         self.state["agents"] = {"impl-feat": {"status": "idle"}}

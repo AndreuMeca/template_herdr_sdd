@@ -57,7 +57,9 @@ A level a CLI does not have (—) is a config error that names the levels it doe
 same promise through different mechanisms; `full` is only for a machine you would not mind an agent
 breaking. What either means for the harness: `harness/docs/sdd.md` §9. For a CLI not in these tables
 (`gemini`, `opencode`, ...), `effort` and `permissions` are not translated: `config` says so, and its own
-flags go in `args` (Gemini CLI: `--yolo`).
+flags go in `args` (Gemini CLI: `--yolo`). To translate for another CLI, add one `Cli(...)` entry to `CLIS`
+in `harness/harness.py` (its flags, the `doctor --models` probe, the startup dialogs it may show) and one
+column to the tables above.
 
 herdr only passes model and flags through. The launcher answers Claude Code's two startup dialogs (trust
 folder, bypass-permissions warning) itself; any other dialog is reported.
