@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The launcher's own tests: python3 harness/selftest.py [-v].
 
-Stdlib unittest, one temporary git repo (main checkout + one feature worktree) per test, no herdr: everything
-that talks to herdr is stubbed. Not named test_*.py on purpose, so a project's own pytest run does not collect it.
+Stdlib unittest, one temporary git repo (main checkout + one feature worktree) per test, no herdr: the launcher
+talks to herdr only through its HERDR adapter, whose methods the tests replace (`stub_herdr`), or a stand-in
+`herdr` binary on PATH answers. Not named test_*.py on purpose, so a project's own pytest run does not collect it.
 """
 
 from __future__ import annotations
@@ -253,14 +254,19 @@ class Case(unittest.TestCase):
         if self.fake_herdr:
             self.install_fake_herdr()
         else:
-            self.stub("herdr", no_herdr)
-            self.stub("agent_state", lambda name: "idle")
-            self.stub("sidebar", lambda *a, **k: None)
+            self.stub_herdr("call", no_herdr)
+            self.stub_herdr("state", lambda name: "idle")
+            self.stub_herdr("sidebar", lambda *a, **k: None)
 
     def stub(self, name, value):
         orig = getattr(h, name)
         setattr(h, name, value)
         self.addCleanup(setattr, h, name, orig)
+
+    def stub_herdr(self, method, value):
+        """Replace one method of the launcher's HERDR adapter for this test."""
+        setattr(h.HERDR, method, value)
+        self.addCleanup(vars(h.HERDR).pop, method, None)
 
     def setenv(self, name, value):
         old = os.environ.get(name)
@@ -650,38 +656,38 @@ class GitHelpers(Case):
         self.assertEqual(self.r.git("status", "--porcelain", cwd=self.r.wt), "")
 
     def test_driver_lock(self):
-        self.assertEqual(h.driver_running(self.r.wt), 0)
-        lock = h.driver_lock(self.r.wt)
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0)
+        lock = h.DriverLock(self.r.wt).path
         pid = fake_driver(self)
         lock.write_text(str(pid))
-        self.assertEqual(h.driver_running(self.r.wt), pid)
+        self.assertEqual(h.DriverLock(self.r.wt).running(), pid)
         lock.write_text("999999999")
-        self.assertEqual(h.driver_running(self.r.wt), 0, "a stale lock counts as no driver")
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0, "a stale lock counts as no driver")
         if ps_works():
             lock.write_text(str(os.getpid()))
-            self.assertEqual(h.driver_running(self.r.wt), 0, "a live pid that is not a driver: the OS reused it")
+            self.assertEqual(h.DriverLock(self.r.wt).running(), 0, "a live pid that is not a driver: the OS reused it")
 
     def test_acquire_driver_lock(self):
-        lock = h.driver_lock(self.r.wt)
-        self.assertEqual(h.acquire_driver_lock(self.r.wt), 0)
+        lock = h.DriverLock(self.r.wt).path
+        self.assertEqual(h.DriverLock(self.r.wt).acquire(), 0)
         self.assertEqual(lock.read_text(), str(os.getpid()))
         lock.unlink()
         pid = fake_driver(self)
         lock.write_text(str(pid))
-        self.assertEqual(h.acquire_driver_lock(self.r.wt), pid, "a live driver keeps its lock")
+        self.assertEqual(h.DriverLock(self.r.wt).acquire(), pid, "a live driver keeps its lock")
         lock.write_text("999999999")
-        self.assertEqual(h.acquire_driver_lock(self.r.wt), 0, "a dead driver's lock is taken over")
+        self.assertEqual(h.DriverLock(self.r.wt).acquire(), 0, "a dead driver's lock is taken over")
         self.assertEqual(lock.read_text(), str(os.getpid()))
 
     def test_a_second_driver_refuses_to_run(self):
-        h.driver_lock(self.r.wt).write_text(str(fake_driver(self)))
+        h.DriverLock(self.r.wt).path.write_text(str(fake_driver(self)))
         f = h.Feature.find(self.r.root, "feat")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = h.Driver(self.r.root, self.r.cfg(), f, "", "").run()
         self.assertEqual(code, h.EXIT_ERROR)
         self.assertIn("is already running feat", err.getvalue())
-        self.assertFalse(h.driver_stamp(self.r.wt).exists(), "it stops before announcing a start")
+        self.assertFalse(h.DriverLock(self.r.wt).stamp.exists(), "it stops before announcing a start")
 
 
 # ----------------------------------------------------------------------------- check rules
@@ -895,9 +901,9 @@ class RoleRuns(Case):
         cfg = self.r.cfg()
         self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", False, "", cfg)[0], "STILL_WORKING")
         self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "agent_blocked", cfg)[0], "NEEDS_ATTENTION")
-        self.stub("agent_state", lambda name: "blocked")
+        self.stub_herdr("state", lambda name: "blocked")
         self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)[0], "NEEDS_ATTENTION")
-        self.stub("agent_state", lambda name: "idle")
+        self.stub_herdr("state", lambda name: "idle")
         result, note, errs, _ = h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)
         self.assertEqual((result, errs), ("NEEDS_ATTENTION", []))
         self.assertIn("is not what spec_author must leave", note)
@@ -947,7 +953,7 @@ class RoleRuns(Case):
         (self.r.wt / "x.txt").write_text("")
         self.assertIn("uncommitted changes", h.preflight(cfg, self.r.wt, "spec_author", "feat", "pending", ""))
         (self.r.wt / "x.txt").unlink()
-        self.stub("agent_state", lambda name: "working")
+        self.stub_herdr("state", lambda name: "working")
         self.assertIn("spec-feat is still working", h.preflight(cfg, self.r.wt, "spec_author", "feat", "pending", ""))
 
     def review_ready(self):
@@ -999,9 +1005,9 @@ class DriverTests(Case):
         self.calls: list[tuple[str, str]] = []
         self.notes: list[str] = []
         self.actions: dict[str, list] = {"spec_author": [], "implementer": [], "reviewer": []}
-        self.stub("prompt_or_start", self.fake_prompt)
-        self.stub("wait_agent", lambda name, ms: (True, ""))
-        self.stub("notify", lambda pane, text: self.notes.append(text))
+        self.stub_herdr("prompt_or_start", self.fake_prompt)
+        self.stub_herdr("wait", lambda name, ms: (True, ""))
+        self.stub_herdr("notify", lambda pane, text: self.notes.append(text))
         self.merged = []
         self.stub("Driver", type("Driver", (h.Driver,), {"spawn_merge": lambda driver: self.fake_merge(driver)}))
 
@@ -1012,7 +1018,7 @@ class DriverTests(Case):
 
     def fake_merge(self, driver):
         self.merged.append(driver.slug)
-        driver.lock.unlink()
+        driver.lock.release()
         raise h._Stop(h.EXIT_DONE)
 
     # role behaviours
@@ -1068,8 +1074,8 @@ class DriverTests(Case):
             self.fake_prompt(root, wt, role, slug, text, timeout_ms, acfg)
             return False, ""
 
-        self.stub("wait_agent", wait)
-        self.stub("prompt_or_start", prompt)
+        self.stub_herdr("wait", wait)
+        self.stub_herdr("prompt_or_start", prompt)
         self.stub("time", types.SimpleNamespace(time=lambda: clock[0], sleep=lambda s: None))
         self.actions["spec_author"] = [self.spec_author]
         return waits
@@ -1099,7 +1105,7 @@ class DriverTests(Case):
         self.assertEqual(self.merged, ["feat"])
         self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
         self.assertIn("run reviewer", out)
-        self.assertEqual(h.driver_running(self.r.wt), 0)
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0)
 
     def test_human_gate_stops_and_notifies(self):
         self.actions["spec_author"] = [self.spec_author]
@@ -1108,7 +1114,7 @@ class DriverTests(Case):
         self.assertEqual(len(self.notes), 1)
         self.assertIn("harness: feat spec ready, needs you", self.notes[0])
         self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "spec_ready")
-        self.assertEqual(h.driver_running(self.r.wt), 0)
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0)
         self.assertFalse(self.merged)
 
     def test_message_at_the_gate_goes_to_the_judged_role(self):
@@ -1167,10 +1173,10 @@ class Commands(Case):
         self.assertIn("1 working", out)
         self.assertIn("(agent working)", out)
         self.stub("role_working", lambda role, slug: False)
-        h.driver_lock(self.r.wt).write_text(str(fake_driver(self)))
+        h.DriverLock(self.r.wt).path.write_text(str(fake_driver(self)))
         _, out = self.output(h.cmd_status, Namespace())
         self.assertIn("(driver running)", out)
-        h.driver_lock(self.r.wt).unlink()
+        h.DriverLock(self.r.wt).path.unlink()
         self.r.spec("spec_ready")
         self.r.tasks()
         _, out = self.output(h.cmd_status, Namespace())
@@ -1221,7 +1227,7 @@ class Commands(Case):
             self.r.git("worktree", "add", "-q", "-b", slug, str(path), base)
             return {"worktree": {"path": str(path)}, "workspace": {"workspace_id": "w9"}}
 
-        self.stub("create_worktree", create)
+        self.stub_herdr("create_worktree", create)
         code, _ = self.output(h.cmd_start, Namespace(slug="newf", intent="do y", trust=False, detach=False))
         self.assertEqual(code, 0)
         self.assertTrue((self.r.tmp / "wt-new" / "harness" / "features" / "newf" / "spec.md").exists())
@@ -1262,7 +1268,7 @@ class Commands(Case):
     def test_merge_reports_a_failure_to_the_notify_pane(self):
         self.chdir(self.r.root)
         notes = []
-        self.stub("notify", lambda pane, text: notes.append(text))
+        self.stub_herdr("notify", lambda pane, text: notes.append(text))
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
             h.cmd_merge(Namespace(slug="feat", notify="wB:p2"))
         self.assertEqual(ctx.exception.code, h.EXIT_ERROR)
@@ -1275,7 +1281,7 @@ class Commands(Case):
 
     def test_merge_lands_and_cleans_up(self):
         self.chdir(self.r.root)
-        self.stub("workspace_of", lambda wt: None)
+        self.stub_herdr("workspace_of", lambda wt: None)
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
@@ -1287,7 +1293,7 @@ class Commands(Case):
         self.r.review("APPROVED")
         self.r.commit("feat: review", cwd=self.r.wt)
         notes = []
-        self.stub("notify", lambda pane, text: notes.append((pane, text)))
+        self.stub_herdr("notify", lambda pane, text: notes.append((pane, text)))
         code, out = self.output(h.cmd_merge, Namespace(slug="feat", notify="wB:p2"))
         self.assertEqual(code, 0)
         self.assertIn("merged feat into main", out)
@@ -1308,7 +1314,7 @@ class HerdrAdapter(Case):
     ACFG = {"kind": "claude", "model": "m", "effort": "high", "permissions": "full"}
 
     def test_prompt_or_start_starts_the_agent_in_its_own_tab(self):
-        settled, note = h.prompt_or_start(
+        settled, note = h.HERDR.prompt_or_start(
             self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, agent(self.ACFG)
         )
         self.assertEqual((settled, note), (True, ""))
@@ -1344,7 +1350,7 @@ class HerdrAdapter(Case):
 
     def test_repo_placeholder_is_the_main_checkout(self):
         acfg = {"kind": "codex", "args": ["--add-dir", "{repo}/.git"]}
-        h.prompt_or_start(
+        h.HERDR.prompt_or_start(
             self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, agent(acfg)
         )  # from inside the worktree
         self.assertEqual(self.calls("agent", "start")[0][-2:], ["--add-dir", f"{self.r.root.resolve()}/.git"])
@@ -1352,7 +1358,9 @@ class HerdrAdapter(Case):
     def test_startup_dialogs_are_answered(self):
         self.state.update(start_status="blocked", screen="Do you trust this folder? (y/n)")
         self.save_state()
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, agent(self.ACFG))
+        settled, note = h.HERDR.prompt_or_start(
+            self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, agent(self.ACFG)
+        )
         self.assertEqual((settled, note), (True, ""))
         self.assertEqual(
             self.calls("agent", "send-keys"),
@@ -1360,12 +1368,14 @@ class HerdrAdapter(Case):
         )
         self.state.update(screen="Something unexpected?", agents={})
         self.save_state()
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, agent(self.ACFG))
+        settled, note = h.HERDR.prompt_or_start(
+            self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, agent(self.ACFG)
+        )
         self.assertEqual((settled, note), (True, "blocked at startup"))
         self.state.update(screen="Do you trust this folder? (y/n)", agents={})
         self.save_state()
         codex = {"kind": "codex", "permissions": "full"}
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, agent(codex))
+        settled, note = h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, agent(codex))
         self.assertEqual(note, "blocked at startup", "a dialog is answered only for the CLI known to show it")
         self.assertEqual(len(self.calls("agent", "send-keys")), 2)
 
@@ -1374,30 +1384,31 @@ class HerdrAdapter(Case):
         self.state["prompt_error"] = "timeout"
         self.save_state()
         self.assertEqual(
-            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)), (False, "")
+            h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)),
+            (False, ""),
         )
         self.state["prompt_error"] = "agent_blocked"
         self.save_state()
         self.assertEqual(
-            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)),
+            h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)),
             (True, "agent_blocked"),
         )
         self.assertEqual(self.calls("agent", "start"), [], "an existing agent is never started again")
-        self.assertEqual(h.agent_state("impl-feat"), "idle")
-        self.assertEqual(h.agent_state("nobody"), "gone")
-        self.assertEqual(h.wait_agent("nobody", 5), (True, "agent_not_found"))
+        self.assertEqual(h.HERDR.state("impl-feat"), "idle")
+        self.assertEqual(h.HERDR.state("nobody"), "gone")
+        self.assertEqual(h.HERDR.wait("nobody", 5), (True, "agent_not_found"))
         self.state["wait_error"] = "timeout"
         self.save_state()
-        self.assertEqual(h.wait_agent("impl-feat", 5), (False, ""))
+        self.assertEqual(h.HERDR.wait("impl-feat", 5), (False, ""))
 
     def test_launch_driver_uses_the_driver_tab(self):
-        stamp = h.driver_stamp(self.r.wt)
+        stamp = h.DriverLock(self.r.wt).stamp
         self.state["touch_on_pane_run"] = str(stamp)
         self.save_state()
-        h.driver_lock(self.r.wt).write_text("999999999")  # a lock left by a driver that died
-        pane = h.launch_driver(self.r.root, self.r.wt, "feat", "two\nlines of feedback", "wB:p2")
+        h.DriverLock(self.r.wt).path.write_text("999999999")  # a lock left by a driver that died
+        pane = h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "two\nlines of feedback", "wB:p2")
         self.assertEqual(pane, "w1:p2")
-        self.assertFalse(h.driver_lock(self.r.wt).exists(), "the stale lock was removed before the launch")
+        self.assertFalse(h.DriverLock(self.r.wt).path.exists(), "the stale lock was removed before the launch")
         self.assertEqual(self.calls("tab", "create")[0][6:], ["--label", "driver", "--no-focus"])
         run = self.calls("pane", "run")[0]
         self.assertEqual(run[:3], ["pane", "run", "w1:p2"])
@@ -1409,26 +1420,26 @@ class HerdrAdapter(Case):
             tabs=[{"tab_id": "w1:t5", "label": "driver"}], panes=[sidebar, {"pane_id": "w1:p7", "tab_id": "w1:t5"}]
         )
         self.save_state()
-        self.assertEqual(h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p7")
+        self.assertEqual(h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p7")
         self.assertEqual(len(self.calls("tab", "create")), 1, "an existing driver tab is reused")
         self.assertTrue(self.calls("pane", "run")[-1][3].endswith("drive feat"))
         self.assertEqual(self.calls("pane", "run")[-1][2], "w1:p7", "never the Sidebar pane")
         self.state["panes"] = [sidebar, {"pane_id": "w1:p9", "tab_id": "w1:t5", "agent": "claude"}]
         self.save_state()
         self.assertEqual(
-            h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p9", "the only shell-ish pane left"
+            h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p9", "the only shell-ish pane left"
         )
 
     def test_launch_driver_reports_a_driver_that_did_not_start(self):
         with self.assertRaises(h.HerdrError) as ctx:
-            h.launch_driver(self.r.root, self.r.wt, "feat", "", "")
+            h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "", "")
         self.assertEqual(ctx.exception.code, "driver_not_started")
         self.assertIn("herdr pane read w1:p2", ctx.exception.message)
         self.assertEqual(len(self.calls("pane", "run")), 1)
 
     def test_worktree_create_nests_under_the_callers_workspace(self):
         self.setenv("HERDR_WORKSPACE_ID", "w0")
-        res = h.create_worktree(self.r.root, "newf", "main", trust=True)
+        res = h.HERDR.create_worktree(self.r.root, "newf", "main", trust=True)
         self.assertEqual(res["worktree"]["path"], str(self.r.tmp / "new-wt"))
         create = self.calls("worktree", "create")[0]
         self.assertEqual(
@@ -1438,20 +1449,20 @@ class HerdrAdapter(Case):
             create[4:], ["--branch", "newf", "--base", "main", "--label", "newf", "--no-focus", "--trust-repository"]
         )
         self.setenv("HERDR_WORKSPACE_ID", None)
-        h.create_worktree(self.r.root, "other", "main", trust=False)
+        h.HERDR.create_worktree(self.r.root, "other", "main", trust=False)
         self.assertEqual(self.calls("worktree", "create")[1][2:4], ["--cwd", str(self.r.root)])
         self.assertNotIn("--trust-repository", self.calls("worktree", "create")[1])
-        self.assertEqual(h.worktree_workspace(self.r.root, self.r.wt), "w1")
+        self.assertEqual(h.HERDR.open_workspace(self.r.root, self.r.wt), "w1")
         closed = self.r.tmp / "closed"  # a real worktree whose herdr workspace is closed: it gets reopened
         self.r.git("worktree", "add", "-q", "-b", "closed", str(closed))
-        self.assertEqual(h.worktree_workspace(self.r.root, closed), "w9")
+        self.assertEqual(h.HERDR.open_workspace(self.r.root, closed), "w9")
         self.assertEqual(
             self.calls("worktree", "open")[0][2:],
             ["--cwd", str(self.r.root), "--path", str(closed), "--no-focus"],
         )
 
     def test_sidebar_notify_and_remove_worktree(self):
-        h.sidebar(self.r.wt, "spec ready · needs you: approve")
+        h.HERDR.sidebar(self.r.wt, "spec ready · needs you: approve")
         self.assertEqual(
             self.calls("workspace", "report-metadata"),
             [
@@ -1468,7 +1479,7 @@ class HerdrAdapter(Case):
         )
         self.state["agents"] = {"wB:p2": {"status": "idle"}}
         self.save_state()
-        h.notify("wB:p2", "harness: feat is done")
+        h.HERDR.notify("wB:p2", "harness: feat is done")
         self.assertEqual(self.calls("agent", "prompt")[-1], ["agent", "prompt", "wB:p2", "harness: feat is done"])
         self.r.git("merge", "-q", "--no-edit", "feat")  # the branch must be merged for `git branch -d`
         self.r.write_cfg(teardown_cmd="echo torn > teardown.txt")
