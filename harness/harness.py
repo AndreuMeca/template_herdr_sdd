@@ -1362,8 +1362,8 @@ class Driver:
 class Doctor:
     """Tools, config and leftovers of the repo at `root` (its main checkout). `run()` prints the report."""
 
-    def __init__(self, root: Path):
-        self.root = root
+    def __init__(self, root: Path, tests: bool = True, models: bool = False):
+        self.root, self.tests, self.models = root, tests, models
         self.problems: list[str] = []
         self.notes: list[str] = []
 
@@ -1380,6 +1380,7 @@ class Doctor:
         cfg = load_cfg(self.root)
         self.check(True, "harness/config.json is valid")
         self.config(cfg)
+        self.baseline(cfg)
         self.git_leftovers(cfg.base_branch)
         if shutil.which("herdr") is not None:
             self.herdr_state()
@@ -1408,6 +1409,20 @@ class Doctor:
         report = settings_report(self.root, cfg)
         if APPLY_CMD in report:
             self.notes.append(report)
+
+    def baseline(self, cfg: Config):
+        """test_cmd on the main checkout: a red baseline would be blamed on the first feature's implementer."""
+        if not self.tests:
+            self.notes.append("test_cmd not run (--no-tests)")
+            return
+        code, out = shell(cfg.test_cmd, self.root)
+        fix = (
+            "a red baseline gets blamed on the first feature's implementer: set up the project "
+            "(e.g. pyproject.toml and tests/ for the shipped uv/pytest commands) or change test_cmd"
+        )
+        self.check(code == 0, f"test_cmd green on the main checkout ({cfg.test_cmd})", fix)
+        if code != 0:
+            print("\n".join("      | " + line for line in out.splitlines()[-15:]))
 
     def git_leftovers(self, base: str):
         root = self.root
@@ -1826,7 +1841,7 @@ def cmd_merge(a):
 
 
 def cmd_doctor(a):
-    return Doctor(main_checkout(repo_root())).run()
+    return Doctor(main_checkout(repo_root()), tests=not a.no_tests, models=a.models).run()
 
 
 # ----------------------------------------------------------------------------- cli
@@ -1887,7 +1902,12 @@ def main(argv=None) -> int:
     s.add_argument("slug")
     s.set_defaults(fn=cmd_approve)
 
-    sub.add_parser("doctor", help="tools, config and leftovers (anyone)").set_defaults(fn=cmd_doctor)
+    s = sub.add_parser("doctor", help="tools, config, a green test_cmd, leftovers (anyone)")
+    s.add_argument("--no-tests", action="store_true", help="skip running test_cmd on the main checkout")
+    s.add_argument(
+        "--models", action="store_true", help="also send each Claude/Codex role one tiny prompt with its model"
+    )
+    s.set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser(
         "merge", help="merge an approved, reviewed feature; mark done; remove the worktree (human, base branch)"

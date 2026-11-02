@@ -18,7 +18,9 @@ every agent reads; the rest of the repo is your project.
 3. Edit `harness/config.json`: agent per role, gates, commands, files to copy into worktrees. Every
    key is explained in `harness/help/config.md`.
 4. Add your code outside `harness/`, commit, open the repo in herdr, start your agent and ask for a
-   feature. `uv run harness/harness.py doctor` checks tools and config. The Claude you open in this
+   feature. `uv run harness/harness.py doctor` checks tools and config and runs `test_cmd` on the main
+   checkout: get it all green before the first feature, or the first implementer gets blamed for a red
+   baseline (`--no-tests` skips that run). The Claude you open in this
    repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `config
    --apply` writes them to `.claude/settings.local.json` (per machine, not committed), so with
    `--dangerously-skip-permissions` in its args the orchestrator never stops to ask (accept Claude

@@ -1315,5 +1315,23 @@ class HerdrAdapter(Case):
         self.assertIn("herdr workspace close w8", out)
 
 
+class DoctorChecks(Case):
+    def test_baseline_runs_test_cmd_unless_skipped(self):
+        self.r.write_cfg(test_cmd="echo boom; false")
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertIn("FAIL  test_cmd green on the main checkout (echo boom; false)", out)
+        self.assertIn("boom", out)
+        self.assertIn("blamed on the first feature's implementer", out)
+        doc = h.Doctor(self.r.root, tests=False)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertEqual((out, doc.problems), ("", []))
+        self.assertIn("test_cmd not run (--no-tests)", doc.notes)
+        self.r.write_cfg(test_cmd="true")
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertIn("ok    test_cmd green on the main checkout (true)", out)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], *sys.argv[1:]])
