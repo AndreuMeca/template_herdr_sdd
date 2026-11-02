@@ -14,12 +14,6 @@
     "merge": "auto"
   },
   "agents": {
-    "orchestrator": {
-      "harness": "claude",
-      "model": "claude-opus-5-5",
-      "effort": "medium",
-      "permissions": "full"
-    },
     "spec_author": {
       "harness": "claude",
       "model": "claude-fable-5-1",

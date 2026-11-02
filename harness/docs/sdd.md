@@ -128,9 +128,8 @@ security boundary. An agent with `permissions: full` (Claude Code `--dangerously
 `--dangerously-bypass-approvals-and-sandbox`) can run any command as you: move a ref such as
 `refs/harness/<slug>/review-start` (which defeats rule 10), edit the main checkout's `config.json` or
 `harness/`, read what `copy_files` brought in (`.env`), or push. What holds against honest mistakes: checks
-and commands come from the main checkout, `merge` is local, a push is always yours, and only the human
-applies the orchestrator's own permissions (`doctor` in their terminal, or `config --apply`; inside a Claude Code
-session `doctor` only reports). With both gates `auto`, nobody reads the spec
+and commands come from the main checkout, `merge` is local, a push is always yours, and the orchestrator
+runs with the permissions you started it with. With both gates `auto`, nobody reads the spec
 or the code before it lands on the base branch; that is a per-project choice in `config.json`. For more
 containment use `permissions: guarded` (Codex: a sandbox that writes only in the worktree; Claude Code: auto
 mode's classifier, which limits risky actions but is not a sandbox), or a disposable machine or container.

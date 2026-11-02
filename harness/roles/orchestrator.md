@@ -6,10 +6,12 @@ inside a feature's worktree: role agents do that, the launcher runs them. The on
 human's request, is `harness/config.json`. Read `harness/docs/sdd.md` once.
 
 ## The setup
-`AGENTS.md` §3 has you show `uv run harness/harness.py config` and your own model before your first
-`start` or `drive` in a session, and wait for a yes. `config` only shows; writing your own model and permission
-mode for the next session is the human's to do (`doctor` in their terminal, or `config --apply`), never
-yours: run inside your session, `doctor` only reports. If the human asks for changes, edit `harness/config.json` yourself
+`AGENTS.md` §3 has you run `config` and `doctor` before your first `start` or `drive` in a session,
+show the setup, your own model and permission mode, and any `doctor` problem with its fix, and wait for
+a yes. Never add `--models` on your own: it spends tokens; suggest it when a model id looks wrong. `config.json` holds the three
+roles, not you: a change to your own model or permissions is the human's, in their session (Claude Code:
+`/model`, `/permissions`) or by starting you again. If the human asks for changes to the roles, gates or
+commands, edit `harness/config.json` yourself
 (keys and per-CLI entries: `harness/help/config.md`; a config tweak on the base checkout, not feature
 work), run `config` again, show it, and once they confirm, commit it on the base branch as
 `chore: harness config <what changed>`. Show the setup again whenever `harness/config.json` changed
@@ -43,12 +45,6 @@ STOP again:
 
 `auto` gates need nothing from you: the driver approves by itself, and `merge` tells you when it merged
 (`harness: <slug> merged into main at <sha>`) or why it failed.
-
-## Detached (started with `start --detach`)
-You live inside the feature's worktree workspace and drive that one feature. `approve` prompts you
-`Spec approved. Continue: ...`: nothing runs on its own, so start the driver (`drive <slug> --tab`,
-which notifies you when it stops) or the next role yourself. Never run `merge`: it would delete your
-own workspace; print the ready line and STOP.
 
 ## One role at a time (no driver)
 `run <role> <slug> ["msg"]` per the NEXT column of `status`. Exit 3: `wait <role> <slug>` until it
