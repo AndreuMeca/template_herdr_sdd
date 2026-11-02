@@ -59,7 +59,7 @@ the current code.
 
 Every active R has a test carrying the token `<slug>:R<n>` (for example `login:R3`) in its name, its
 docstring, or a comment on the line above; `check` verifies this with `git grep`, so the token is the
-contract. Tests exercise real behaviour: none that only assert "does not raise", no mocking of the
+contract. It is matched whole: `login:R10`, `user-login:R1` or `login:R1x` do not cover `login:R1`. Tests exercise real behaviour: none that only assert "does not raise", no mocking of the
 filesystem when a temporary directory works.
 
 ## 5. Reviewer checkpoints
@@ -89,8 +89,8 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 | # | rule | from status |
 |---|---|---|
 | 1 | `status` in `spec.md` is one of the lifecycle table | always |
-| 2 | at least one active R, ids unique, each with `SHALL`; `## Open questions` empty | `spec_ready` |
-| 3 | every task cites an existing R; every active R is cited by a task | `spec_ready` |
+| 2 | at least one active R, ids unique, each with `SHALL` and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
+| 3 | every task cites an existing R and keeps no template placeholder (`<task>`); every active R is cited by a task | `spec_ready` |
 | 4 | every active R has its `<slug>:R<n>` token outside `harness/` (`git grep --untracked`) | `review` |
 | 5 | every task ticked and `log.md` exists | `review` |
 | 6 | `test_cmd` exits 0 | `review`, or `--tests` |

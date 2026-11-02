@@ -53,6 +53,8 @@ DONE_WHEN = {  # on-disk evidence that a role finished its job
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
 TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
+# the example placeholders of harness/features/_template/: a requirement or task still holding one was never written
+TEMPLATE_PLACEHOLDERS = ("<trigger>", "<response>", "<unwanted condition>", "<task>")
 EXIT_DONE, EXIT_ERROR, EXIT_ATTENTION, EXIT_WORKING = 0, 1, 2, 3
 DEFAULT_TIMEOUT_MS = 100_000  # below Claude Code's 120 s default shell timeout
 DRIVE_WAIT_MS = 300_000  # the driver waits for a role in slices of this length
@@ -351,9 +353,13 @@ def copy_ignored(src: Path, dst: Path, patterns: list[str]) -> str:
 # ----------------------------------------------------------------------------- frontmatter / features
 def fm_read(path: Path) -> dict:
     try:
-        lines = path.read_text().splitlines()
+        return fm_parse(path.read_text())
     except FileNotFoundError:
         return {}
+
+
+def fm_parse(text: str) -> dict:
+    lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}
     out = {}
@@ -501,10 +507,16 @@ def approved_once(wt: Path, slug: str, base: str) -> bool:
 
 
 def review_rounds(wt: Path, slug: str, base: str) -> int:
-    """Finished review rounds on this branch: commits that wrote review.md, minus the launcher's removals of it."""
+    """Review rounds on this branch that ended in CHANGES_REQUESTED: the verdicts the launcher cleared (`drop_review`
+    commits, one per round however often the reviewer committed), plus the verdict on disk now."""
     review = f"harness/features/{slug}/review.md"
-    subjects = git("log", "--format=%s", f"{base}..HEAD", "--", review, cwd=wt, check=False).splitlines()
-    return sum(1 for s in subjects if s != f"{slug}: clear previous review")
+    clears = git(
+        "log", "--format=%H", "--grep", f"^{slug}: clear previous review$", f"{base}..HEAD", "--", review,
+        cwd=wt, check=False,
+    ).splitlines()  # fmt: skip
+    verdicts = [fm_parse(git("show", f"{sha}^:{review}", cwd=wt, check=False)).get("verdict", "") for sha in clears]
+    verdicts.append(feature_state(feature_dir(wt, slug))[1])
+    return verdicts.count("CHANGES_REQUESTED")
 
 
 def block_feature(wt: Path, slug: str, reason: str):
@@ -902,9 +914,21 @@ def spec_errors(slug: str, text: str, st: str) -> tuple[list[str], dict, dict]:
     if not active:
         errs.append(f"{slug}: no active requirement line '- R<n>: ... SHALL ...' under ## Requirements")
     errs += [f"{slug}: {k} has no SHALL" for k, v in active.items() if "SHALL" not in v]
+    errs += placeholder_errors(slug, active.items())
     if st != "blocked" and any(line.strip() for line in section(text, "Open questions")):
         errs.append(f"{slug}: ## Open questions is not empty (answer them or set status blocked)")
     return errs, reqs, active
+
+
+def placeholder_errors(slug: str, items) -> list[str]:
+    """Rules 2-3: (id, text) pairs that still hold the template's first placeholder."""
+    errs = []
+    for item_id, text in items:
+        found = [t for t in TEMPLATE_PLACEHOLDERS if t in text]
+        if found:
+            token = min(found, key=text.find)
+            errs.append(f"{slug}: {item_id} still has the template placeholder {token}")
+    return errs
 
 
 def task_errors(slug: str, tasks_path: Path, reqs: dict, active: dict) -> tuple[list[str], list[tuple[str, str, str]]]:
@@ -924,17 +948,25 @@ def task_errors(slug: str, tasks_path: Path, reqs: dict, active: dict) -> tuple[
         covered |= cited
     if not tasks:
         errs.append(f"{slug}: no task line '- [ ] T<n>: ... (R<n>)' in tasks.md")
+    errs += placeholder_errors(slug, [(tid, text) for _, tid, text in tasks])
     errs += [
         f"{slug}: {r} is not covered by any task" for r in sorted(active.keys() - covered, key=lambda x: int(x[1:]))
     ]
     return errs, tasks
 
 
+def token_pattern(slug: str, r: str) -> str:
+    """git grep -E pattern for the token `<slug>:<R>` as a whole: not inside `x<slug>:`, `a-<slug>:`, `<R>0` or `<R>x`.
+    Slugs are [a-z0-9-] and ids R<digits>, so neither needs escaping."""
+    return f"(^|[^A-Za-z0-9_-]){slug}:{r}([^A-Za-z0-9_]|$)"
+
+
 def done_errors(root: Path, slug: str, active: dict, tasks: list) -> list[str]:
     """Rules 4-5: every active R has its token in a test, every task is ticked, log.md exists."""
     errs = []
     for r in sorted(active, key=lambda x: int(x[1:])):
-        p = sh(["git", "grep", "--untracked", "-q", f"{slug}:{r}", "--", ".", ":!harness"], cwd=root, check=False)
+        pattern = token_pattern(slug, r)
+        p = sh(["git", "grep", "--untracked", "-q", "-E", pattern, "--", ".", ":!harness"], cwd=root, check=False)
         if p.returncode != 0:
             errs.append(f"{slug}: no test carries the token {slug}:{r}")
     errs += [f"{slug}: {tid} is not ticked" for box, tid, _ in tasks if box == " "]
