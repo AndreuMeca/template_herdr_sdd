@@ -566,15 +566,15 @@ class ConfigTests(Case):
 # ----------------------------------------------------------------------------- git helpers
 class GitHelpers(Case):
     def test_main_checkout_and_refs(self):
-        self.assertEqual(h.main_checkout(self.r.wt).resolve(), self.r.root.resolve())
-        self.assertTrue(h.is_main_checkout(self.r.root))
-        self.assertFalse(h.is_main_checkout(self.r.wt))
+        self.assertEqual(h.Git(self.r.wt).main_checkout().resolve(), self.r.root.resolve())
+        self.assertTrue(h.Git(self.r.root).is_main())
+        self.assertFalse(h.Git(self.r.wt).is_main())
         ref = "refs/harness/feat/review-start"
-        self.assertFalse(h.ref_exists(ref, self.r.wt))
+        self.assertFalse(h.Git(self.r.wt).ref_exists(ref))
         self.r.ref()
-        self.assertTrue(h.ref_exists(ref, self.r.root), "refs are shared across worktrees")
-        h.drop_ref(ref, self.r.wt)
-        self.assertFalse(h.ref_exists(ref, self.r.wt))
+        self.assertTrue(h.Git(self.r.root).ref_exists(ref), "refs are shared across worktrees")
+        h.Git(self.r.wt).drop_ref(ref)
+        self.assertFalse(h.Git(self.r.wt).ref_exists(ref))
 
     def test_features_everywhere(self):
         feats = h.features_everywhere(self.r.root)
@@ -586,25 +586,25 @@ class GitHelpers(Case):
             h.locate(self.r.root, "nope")
 
     def test_sync_base(self):
-        self.assertEqual(h.sync_base(self.r.wt, "main"), (True, False))
+        self.assertEqual(h.Git(self.r.wt).merge_in("main"), (True, False))
         (self.r.root / "new.txt").write_text("x")
         self.r.commit("main: new")
-        self.assertEqual(h.sync_base(self.r.wt, "main"), (True, True))
+        self.assertEqual(h.Git(self.r.wt).merge_in("main"), (True, True))
         self.assertTrue((self.r.wt / "new.txt").exists())
         (self.r.root / "src" / "m.py").write_text("def f():\n    return 2\n")
         self.r.commit("main: 2")
         (self.r.wt / "src" / "m.py").write_text("def f():\n    return 3\n")
         self.r.commit("feat: 3", cwd=self.r.wt)
-        self.assertEqual(h.sync_base(self.r.wt, "main"), (False, False))
+        self.assertEqual(h.Git(self.r.wt).merge_in("main"), (False, False))
         self.assertEqual(self.r.git("status", "--porcelain", cwd=self.r.wt), "", "a conflict is aborted cleanly")
 
     def test_porcelain_and_changed_paths(self):
         (self.r.wt / "src" / "m.py").write_text("changed\n")
         (self.r.wt / "new dir").mkdir()
         (self.r.wt / "new dir" / "f.txt").write_text("")
-        self.assertEqual(sorted(p for _, p in h.porcelain(self.r.wt)), ["new dir/f.txt", "src/m.py"])
+        self.assertEqual(sorted(p for _, p in h.Git(self.r.wt).porcelain()), ["new dir/f.txt", "src/m.py"])
         self.assertEqual(
-            h.changed_paths(self.r.wt, "main"),
+            h.Git(self.r.wt).changed_paths("main"),
             ["harness/features/feat/spec.md", "harness/features/feat/tasks.md", "new dir/f.txt", "src/m.py"],
         )
 
@@ -868,7 +868,7 @@ class CheckRules(Case):
         self.assertIsNone(
             h.preflight(self.r.cfg(), self.r.wt, "implementer", "feat", "in_progress", "CHANGES_REQUESTED")
         )
-        self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.wt))
+        self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
         (self.r.wt / "src" / "m.py").write_text("print(3)\n")
         self.r.commit("feat: T2", cwd=self.r.wt)
         self.assertEqual(self.r.check(), [])
@@ -935,7 +935,7 @@ class RoleRuns(Case):
         result, note, _, _ = h.evaluate(self.r.wt, "reviewer", "feat", True, "", self.r.cfg())
         self.assertEqual((result, note), ("NEEDS_ATTENTION", "blocked after 1 review rounds"))
         self.assertEqual(h.feature_state(self.r.fdir), ("blocked", "CHANGES_REQUESTED"))
-        self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.wt))
+        self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
         self.assertIn("max_review_rounds", (self.r.fdir / "log.md").read_text())
 
     def test_preflight_refusals(self):
@@ -1297,7 +1297,7 @@ class Commands(Case):
         self.assertTrue((self.r.root / "tests" / "test_feat.py").exists())
         self.assertFalse(self.r.wt.exists())
         self.assertNotIn("feat", self.r.git("branch", "--format=%(refname:short)"))
-        self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.root))
+        self.assertFalse(h.Git(self.r.root).ref_exists("refs/harness/feat/review-start"))
 
 
 # ----------------------------------------------------------------------------- the herdr adapter, through a fake herdr

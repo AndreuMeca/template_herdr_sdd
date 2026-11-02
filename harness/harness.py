@@ -169,91 +169,124 @@ def sh(args, cwd=None, check=True, stdin=None):
     return p
 
 
-def git(*args, cwd=None, check=True) -> str:
-    return sh(["git", *args], cwd=cwd, check=check).stdout.strip()
-
-
 def shell(cmd: str, cwd: Path) -> tuple[int, str]:
     """Run a configured shell command; (exit code, the tail of its output)."""
     p = subprocess.run(cmd, shell=True, cwd=cwd, text=True, capture_output=True, stdin=subprocess.DEVNULL)
     return p.returncode, (p.stdout + p.stderr).strip()[-1500:]
 
 
-def repo_root(cwd=None) -> Path:
-    return Path(git("rev-parse", "--show-toplevel", cwd=cwd))
+class Git:
+    """git in one checkout (the main one or a feature worktree). Every git call of the launcher goes through here."""
 
+    def __init__(self, path):
+        self.path = Path(path)
 
-def is_main_checkout(root: Path) -> bool:
-    common = git("rev-parse", "--git-common-dir", cwd=root)
-    return common == ".git" or Path(common).resolve() == (root / ".git").resolve()
+    @classmethod
+    def here(cls) -> Git:
+        """The checkout the current directory belongs to."""
+        return cls(Path(sh(["git", "rev-parse", "--show-toplevel"]).stdout.strip()))
 
+    def proc(self, *args, check: bool = True) -> subprocess.CompletedProcess:
+        return sh(["git", *args], cwd=self.path, check=check)
 
-def current_branch(cwd) -> str:
-    return git("branch", "--show-current", cwd=cwd)
+    def run(self, *args, check: bool = True) -> str:
+        """stdout of `git <args>`, stripped; dies on failure unless check=False."""
+        return self.proc(*args, check=check).stdout.strip()
 
+    def ok(self, *args) -> bool:
+        return self.proc(*args, check=False).returncode == 0
 
-def main_checkout(cwd) -> Path:
-    """The main checkout of the repo this path belongs to (itself when it is one)."""
-    return Path(git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=cwd)).parent
+    def paths(self, *args) -> set[str]:
+        """Paths from a git command run with -z (NUL-separated, never quoted)."""
+        return {p for p in self.proc(*args, "-z", check=False).stdout.split("\0") if p}
 
+    # --- where we are
+    def head(self) -> str:
+        return self.run("rev-parse", "HEAD")
 
-def ref_exists(ref: str, cwd) -> bool:
-    return sh(["git", "rev-parse", "-q", "--verify", ref], cwd=cwd, check=False).returncode == 0
+    def branch(self) -> str:
+        return self.run("branch", "--show-current")
 
+    def is_main(self) -> bool:
+        common = self.run("rev-parse", "--git-common-dir")
+        return common == ".git" or Path(common).resolve() == (self.path / ".git").resolve()
 
-def drop_ref(ref: str, cwd):
-    sh(["git", "update-ref", "-d", ref], cwd=cwd, check=False)
+    def main_checkout(self) -> Path:
+        """The main checkout of the repo this checkout belongs to (itself when it is one)."""
+        return Path(self.run("rev-parse", "--path-format=absolute", "--git-common-dir")).parent
 
+    def git_dir(self) -> Path:
+        """This checkout's own git dir (a worktree's lives under the main checkout's .git)."""
+        return Path(self.run("rev-parse", "--path-format=absolute", "--git-dir"))
 
-def sync_base(wt: Path, base: str) -> tuple[bool, bool]:
-    """Merge the base branch into the worktree's branch. Returns (merged cleanly, HEAD moved); a conflict is aborted."""
-    before = git("rev-parse", "HEAD", cwd=wt)
-    p = sh(["git", "merge", "--no-edit", base], cwd=wt, check=False)
-    if p.returncode != 0:
-        sh(["git", "merge", "--abort"], cwd=wt, check=False)
-        return False, False
-    return True, git("rev-parse", "HEAD", cwd=wt) != before
+    def worktrees(self) -> list[tuple[Path, str]]:
+        """[(path, branch)] from `git worktree list --porcelain`; the main checkout comes first."""
+        items, path, branch = [], None, ""
+        for line in self.run("worktree", "list", "--porcelain").splitlines() + [""]:
+            if line.startswith("worktree "):
+                path = Path(line[len("worktree ") :])
+            elif line.startswith("branch refs/heads/"):
+                branch = line[len("branch refs/heads/") :]
+            elif line == "" and path is not None:
+                items.append((path, branch))
+                path, branch = None, ""
+        return items
 
+    # --- refs
+    def ref_exists(self, ref: str) -> bool:
+        return self.ok("rev-parse", "-q", "--verify", ref)
 
-def worktrees(root: Path) -> list[tuple[Path, str]]:
-    """[(path, branch)] from `git worktree list --porcelain`; the main checkout comes first."""
-    items, path, branch = [], None, ""
-    for line in git("worktree", "list", "--porcelain", cwd=root).splitlines() + [""]:
-        if line.startswith("worktree "):
-            path = Path(line[len("worktree ") :])
-        elif line.startswith("branch refs/heads/"):
-            branch = line[len("branch refs/heads/") :]
-        elif line == "" and path is not None:
-            items.append((path, branch))
-            path, branch = None, ""
-    return items
+    def set_ref(self, ref: str, rev: str = "HEAD"):
+        self.run("update-ref", ref, rev)
 
+    def drop_ref(self, ref: str):
+        self.proc("update-ref", "-d", ref, check=False)
 
-def paths_z(*args, cwd) -> set[str]:
-    """Paths from a git command run with -z (NUL-separated, never quoted)."""
-    return {p for p in sh(["git", *args, "-z"], cwd=cwd, check=False).stdout.split("\0") if p}
+    # --- the working tree
+    def porcelain(self) -> list[tuple[str, str]]:
+        """[(XY, path)] from `git status --porcelain`, untracked files listed one by one, paths unquoted."""
+        fields = self.proc("status", "--porcelain", "-z", "--untracked-files=all").stdout.split("\0")
+        items, i = [], 0
+        while i < len(fields):
+            entry, i = fields[i], i + 1
+            if len(entry) < 4:
+                continue
+            xy = entry[:2]
+            if xy[0] in "RC":
+                i += 1  # the original path follows as its own field
+            items.append((xy, entry[3:]))
+        return items
 
+    def dirty(self) -> bool:
+        return bool(self.run("status", "--porcelain"))
 
-def porcelain(wt: Path) -> list[tuple[str, str]]:
-    """[(XY, path)] from `git status --porcelain`, untracked files listed one by one, paths unquoted."""
-    fields = sh(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=wt).stdout.split("\0")
-    items, i = [], 0
-    while i < len(fields):
-        entry, i = fields[i], i + 1
-        if len(entry) < 4:
-            continue
-        xy = entry[:2]
-        if xy[0] in "RC":
-            i += 1  # the original path follows as its own field
-        items.append((xy, entry[3:]))
-    return items
+    def changed_paths(self, base: str) -> list[str]:
+        """Paths the branch changed since it forked from (or last merged) the base branch, plus uncommitted and
+        untracked ones."""
+        committed = self.paths("diff", "--name-only", f"{base}...HEAD")
+        return sorted(committed | {p for _, p in self.porcelain()})
 
+    def is_ignored(self, path) -> bool:
+        return self.ok("check-ignore", "-q", path)
 
-def changed_paths(wt: Path, base: str) -> list[str]:
-    """Paths the branch changed since it forked from (or last merged) the base branch, plus uncommitted and
-    untracked ones."""
-    committed = paths_z("diff", "--name-only", f"{base}...HEAD", cwd=wt)
-    return sorted(committed | {p for _, p in porcelain(wt)})
+    def show(self, rev: str, path: str) -> str:
+        """A file as it is at `rev`; empty when it is not there."""
+        return self.run("show", f"{rev}:{path}", check=False)
+
+    def commit(self, msg: str, *paths):
+        """Stage `paths` and commit them (only them, when given)."""
+        if paths:
+            self.run("add", *paths)
+        self.run("commit", "-q", "-m", msg, *(["--", *paths] if paths else []))
+
+    def merge_in(self, base: str) -> tuple[bool, bool]:
+        """Merge the base branch into this checkout's branch. Returns (merged cleanly, HEAD moved); a conflict is
+        aborted."""
+        before = self.head()
+        if not self.ok("merge", "--no-edit", base):
+            self.proc("merge", "--abort", check=False)
+            return False, False
+        return True, self.head() != before
 
 
 # ----------------------------------------------------------------------------- config / worktree files
@@ -360,7 +393,7 @@ class Config:
 
     @classmethod
     def load(cls, root: Path) -> Config:
-        p = main_checkout(root) / "harness" / "config.json"
+        p = Git(root).main_checkout() / "harness" / "config.json"
         try:
             raw = json.loads(p.read_text())
         except FileNotFoundError:
@@ -510,7 +543,7 @@ class WorktreeSetup:
         for rel in sorted(hits):  # parents sort before their children
             if any(p in done for p in rel.parents):
                 continue  # inside a folder already copied whole
-            if sh(["git", "check-ignore", "-q", rel], cwd=src, check=False).returncode != 0:
+            if not Git(src).is_ignored(rel):
                 skipped.append(str(rel))  # tracked or not ignored: the worktree already has git's version
                 continue
             try:
@@ -619,7 +652,7 @@ class Feature:
 def features_everywhere(root: Path) -> dict[str, Feature]:
     """slug -> Feature across every worktree; a worktree on the feature's own branch wins over the base copy."""
     found: dict[str, Feature] = {}
-    for wt, branch in worktrees(root):
+    for wt, branch in Git(root).worktrees():
         if not wt.exists():
             continue
         for spec in sorted((wt / "harness" / "features").glob("*/spec.md")):
@@ -685,9 +718,11 @@ def state_text(st: str, vd: str, gates: dict, running: str = "") -> str:
 
 def approve_commits(wt: Path, slug: str, base: str) -> list[str]:
     """The commits `approve` made on this branch, newest first."""
-    return git(
-        "log", "--format=%H", "--grep", f"^{slug}: spec approved$", f"{base}..HEAD", cwd=wt, check=False
-    ).splitlines()
+    return (
+        Git(wt)
+        .run("log", "--format=%H", "--grep", f"^{slug}: spec approved$", f"{base}..HEAD", check=False)
+        .splitlines()
+    )
 
 
 def approved_once(wt: Path, slug: str, base: str) -> bool:
@@ -698,11 +733,11 @@ def review_rounds(wt: Path, slug: str, base: str) -> int:
     """Review rounds on this branch that ended in CHANGES_REQUESTED: the verdicts the launcher cleared (`drop_review`
     commits, one per round however often the reviewer committed), plus the verdict on disk now."""
     review = f"harness/features/{slug}/review.md"
-    clears = git(
+    clears = Git(wt).run(
         "log", "--format=%H", "--grep", f"^{slug}: clear previous review$", f"{base}..HEAD", "--", review,
-        cwd=wt, check=False,
+        check=False,
     ).splitlines()  # fmt: skip
-    verdicts = [fm_parse(git("show", f"{sha}^:{review}", cwd=wt, check=False)).get("verdict", "") for sha in clears]
+    verdicts = [fm_parse(Git(wt).show(f"{sha}^", review)).get("verdict", "") for sha in clears]
     verdicts.append(feature_state(feature_dir(wt, slug))[1])
     return verdicts.count("CHANGES_REQUESTED")
 
@@ -715,16 +750,15 @@ def block_feature(wt: Path, slug: str, reason: str):
     head = "" if log.exists() else "# Log\n"
     with log.open("a") as fh:
         fh.write(f"{head}\n## {datetime.now():%Y-%m-%d %H:%M} launcher\n- blockers: {reason}\n")
-    git("add", f"harness/features/{slug}", cwd=wt)
-    git("commit", "-q", "-m", f"{slug}: blocked by the launcher", "--", f"harness/features/{slug}", cwd=wt)
+    Git(wt).commit(f"{slug}: blocked by the launcher", f"harness/features/{slug}")
 
 
 def drop_review(root: Path, slug: str):
     review = feature_dir(root, slug) / "review.md"
     rel = review.relative_to(root)
-    if sh(["git", "ls-files", "--error-unmatch", rel], cwd=root, check=False).returncode == 0:
-        git("rm", "-q", rel, cwd=root)
-        git("commit", "-q", "-m", f"{slug}: clear previous review", "--", rel, cwd=root)
+    if Git(root).proc("ls-files", "--error-unmatch", rel, check=False).returncode == 0:
+        Git(root).run("rm", "-q", rel)
+        Git(root).run("commit", "-q", "-m", f"{slug}: clear previous review", "--", rel)  # already staged by rm
     elif review.exists():
         review.unlink()
 
@@ -733,8 +767,7 @@ def approve_spec(wt: Path, slug: str, branch: str):
     spec = feature_dir(wt, slug) / "spec.md"
     fm_set(spec, "status", "approved")
     rel = spec.relative_to(wt)
-    git("add", rel, cwd=wt)
-    git("commit", "-q", "-m", f"{slug}: spec approved", "--", rel, cwd=wt)
+    Git(wt).commit(f"{slug}: spec approved", rel)
     print(f"approved {slug} (committed on '{branch}')")
 
 
@@ -796,7 +829,7 @@ def repo_source(root: Path) -> list:
 def workspace_of(wt: Path) -> str | None:
     """The herdr workspace id open on this worktree, or None. Never opens one."""
     try:
-        wts = herdr("worktree", "list", "--cwd", main_checkout(wt)).get("worktrees", [])
+        wts = herdr("worktree", "list", "--cwd", Git(wt).main_checkout()).get("worktrees", [])
     except HerdrError:
         return None
     return next((w.get("open_workspace_id") for w in wts if Path(w.get("path", "")).resolve() == wt.resolve()), None)
@@ -841,7 +874,7 @@ def wait_agent(name: str, timeout_ms: int) -> tuple[bool, str]:
 
 
 def driver_lock(wt: Path) -> Path:
-    return Path(git("rev-parse", "--path-format=absolute", "--git-dir", cwd=wt)) / "harness-driver.pid"
+    return Git(wt).git_dir() / "harness-driver.pid"
 
 
 def driver_stamp(wt: Path) -> Path:
@@ -1044,7 +1077,7 @@ def prompt_or_start(
                 pane_id = find_key(tab.get("root_pane", tab), "pane_id") or die(
                     f"tab create returned no pane_id: {tab}"
                 )
-                if not start_agent(name, agent, pane_id, main_checkout(root)):
+                if not start_agent(name, agent, pane_id, Git(root).main_checkout()):
                     raise
                 if not settle_startup(name, agent.kind):
                     return True, "blocked at startup"
@@ -1062,22 +1095,22 @@ def scope_errors(wt: Path, slug: str, st: str, vd: str, base: str) -> list[str]:
     """Rules 7-11 of docs/sdd.md §7: what the branch, the spec phase and the reviewer may touch."""
     mine = f"harness/features/{slug}/"
     errs = []
-    for p in changed_paths(wt, base):
+    for p in Git(wt).changed_paths(base):
         if p.startswith("harness/") and not p.startswith(mine):
             errs.append(f"{slug}: touches harness/ outside its folder: {p}")
         elif st in ("pending", "spec_ready", "approved") and not p.startswith(mine):
             errs.append(f"{slug}: changes files outside its folder before the spec is approved: {p}")
     ref = REVIEW_REF.format(slug=slug)
-    if vd and ref_exists(ref, wt):
+    if vd and Git(wt).ref_exists(ref):
         errs += reviewer_errors(wt, slug, base, ref)
-    if st == "review" and vd == "APPROVED" and not ref_exists(ref, wt):  # rule 10
+    if st == "review" and vd == "APPROVED" and not Git(wt).ref_exists(ref):  # rule 10
         errs.append(
             f"{slug}: review.md says APPROVED but the launcher never started a reviewer round; run the reviewer"
         )
     if st in ("approved", "in_progress", "review"):  # rule 11: the approved requirements are the contract
         approved = approve_commits(wt, slug, base)
         if approved:
-            then = requirement_lines(git("show", f"{approved[0]}:{mine}spec.md", cwd=wt, check=False))
+            then = requirement_lines(Git(wt).show(approved[0], f"{mine}spec.md"))
             if then != requirement_lines((wt / mine / "spec.md").read_text()):
                 errs.append(
                     f"{slug}: ## Requirements differs from the approved spec; "
@@ -1091,10 +1124,10 @@ def reviewer_errors(wt: Path, slug: str, base: str, ref: str) -> list[str]:
     nothing but review.md and the status line of spec.md. A path touched and put back is fine."""
     mine = f"harness/features/{slug}/"
     errs = []
-    touched = paths_z("log", "--format=", "--name-only", "--no-merges", f"{ref}..HEAD", f"^{base}", cwd=wt)
-    status = {p: xy for xy, p in porcelain(wt)}
+    touched = Git(wt).paths("log", "--format=", "--name-only", "--no-merges", f"{ref}..HEAD", f"^{base}")
+    status = {p: xy for xy, p in Git(wt).porcelain()}
     for p in sorted(touched | status.keys()):
-        diff = git("diff", ref, "--", p, cwd=wt, check=False).splitlines()  # working tree vs the reviewer's start
+        diff = Git(wt).run("diff", ref, "--", p, check=False).splitlines()  # working tree vs the reviewer's start
         if not diff and status.get(p) != "??":
             continue
         changed = [line for line in diff if line[:1] in "+-" and not line.startswith(("+++", "---"))]
@@ -1178,7 +1211,7 @@ def done_errors(root: Path, slug: str, active: dict, tasks: list) -> list[str]:
     errs = []
     for r in sorted(active, key=lambda x: int(x[1:])):
         pattern = token_pattern(slug, r)
-        p = sh(["git", "grep", "--untracked", "-q", "-E", pattern, "--", ".", ":!harness"], cwd=root, check=False)
+        p = Git(root).proc("grep", "--untracked", "-q", "-E", pattern, "--", ".", ":!harness", check=False)
         if p.returncode != 0:
             errs.append(f"{slug}: no test carries the token {slug}:{r}")
     errs += [f"{slug}: {tid} is not ticked" for box, tid, _ in tasks if box == " "]
@@ -1197,7 +1230,7 @@ def check_feature(root: Path, slug: str, base: str) -> list[str]:
     if st not in STATUSES:  # rule 1
         return [f"{slug}: spec.md status '{st or '(none)'}' is not one of {', '.join(STATUSES)}"]
     errs = []
-    if st != "done" and not is_main_checkout(root):  # rules 7-11 apply to a feature branch
+    if st != "done" and not Git(root).is_main():  # rules 7-11 apply to a feature branch
         errs += scope_errors(root, slug, st, fm_read(fdir / "review.md").get("verdict", ""), base)
     if RANK[st] < 1:
         return errs
@@ -1237,14 +1270,14 @@ def preflight(cfg: Config, wt: Path, role: str, slug: str, st: str, vd: str, tes
         allowed = ", ".join(sorted(RUN_GATE[role]))
         nxt = next_action(st, vd, cfg.gates)
         return f"cannot run {role} while status is '{st or '(none)'}' (allowed: {allowed}); next: {nxt}"
-    if git("status", "--porcelain", cwd=wt):
+    if Git(wt).dirty():
         return f"worktree {wt} has uncommitted changes; a role agent must not start on top of them"
     name = agent_name(role, slug)
     if agent_state(name) == "working":
         return f"{name} is still working; wait for it: harness.py wait {role} {slug}"
     ref = REVIEW_REF.format(slug=slug)
     if role == "reviewer":
-        ok, moved = sync_base(wt, base)
+        ok, moved = Git(wt).merge_in(base)
         if not ok:
             fix = f'harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"'
             return f"merging '{base}' into '{slug}' conflicts; run: {fix}"
@@ -1260,9 +1293,9 @@ def preflight(cfg: Config, wt: Path, role: str, slug: str, st: str, vd: str, tes
     if role == "reviewer" or (role == "implementer" and vd == "APPROVED"):
         drop_review(wt, slug)
     if role == "reviewer":
-        git("update-ref", ref, "HEAD", cwd=wt)
+        Git(wt).set_ref(ref)
     elif role == "implementer":
-        drop_ref(ref, wt)
+        Git(wt).drop_ref(ref)
     return None
 
 
@@ -1284,10 +1317,10 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Conf
         return "NEEDS_ATTENTION", note, errs, state
     if not DONE_WHEN[role](st, vd):
         return "NEEDS_ATTENTION", f"status {st or '?'} / verdict {vd or '-'} is not what {role} must leave", errs, state
-    if role == "implementer" and vd == "APPROVED" and not ref_exists(REVIEW_REF.format(slug=slug), wt):
+    if role == "implementer" and vd == "APPROVED" and not Git(wt).ref_exists(REVIEW_REF.format(slug=slug)):
         drop_review(wt, slug)  # a verdict only the reviewer may write; the reviewer runs next
         note, vd = "discarded a verdict the implementer wrote", ""
-    left = [p for _, p in porcelain(wt)]
+    left = [p for _, p in Git(wt).porcelain()]
     if left:  # docs/sdd.md §6: a role that stops with uncommitted changes has not finished
         more = " ..." if len(left) > 8 else ""
         errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them")
@@ -1301,7 +1334,7 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Conf
             slug,
             f"{cap} review rounds ended in CHANGES_REQUESTED (max_review_rounds); the last findings are in review.md",
         )
-        drop_ref(REVIEW_REF.format(slug=slug), wt)
+        Git(wt).drop_ref(REVIEW_REF.format(slug=slug))
         return "NEEDS_ATTENTION", f"blocked after {cap} review rounds", errs, state
     return "DONE", note, errs, state
 
@@ -1436,7 +1469,7 @@ class Driver:
 
     def require_clean(self):
         """Stop for the human when the worktree has uncommitted changes (a role that could not commit)."""
-        left = [p for _, p in porcelain(self.wt)]
+        left = [p for _, p in Git(self.wt).porcelain()]
         if left:
             more = " ..." if len(left) > 8 else ""
             self.stop(
@@ -1481,7 +1514,7 @@ class Driver:
     def before_review(self, text: str) -> tuple[str, str]:
         """The reviewer sees the branch as it will land, and only when it is green; otherwise the implementer
         goes first."""
-        ok, _ = sync_base(self.wt, self.base)
+        ok, _ = Git(self.wt).merge_in(self.base)
         if not ok:
             return "implementer", SYNC_MSG.format(base=self.base)
         errs = run_check(self.wt, [self.slug], True)
@@ -1544,7 +1577,7 @@ class Driver:
 
     def spawn_merge(self):
         """`merge` removes this worktree, its workspace and this very pane: run it detached from the main checkout."""
-        main = main_checkout(self.wt)
+        main = Git(self.wt).main_checkout()
         log = main / ".git" / f"harness-merge-{self.slug}.log"
         self.lock.unlink()  # `merge` refuses while a driver runs; this one is done
         cmd = [sys.executable, str(Path(__file__).resolve()), "merge", self.slug]
@@ -1605,7 +1638,9 @@ class Doctor:
         return 1 if self.problems else 0
 
     def config(self, cfg: Config):
-        self.check(ref_exists(f"refs/heads/{cfg.base_branch}", self.root), f"base branch '{cfg.base_branch}' exists")
+        self.check(
+            Git(self.root).ref_exists(f"refs/heads/{cfg.base_branch}"), f"base branch '{cfg.base_branch}' exists"
+        )
         for role in ("orchestrator", *ROLES):
             kind = cfg.agent(role).kind
             self.check(
@@ -1657,7 +1692,7 @@ class Doctor:
     def git_leftovers(self, base: str):
         root = self.root
         feats = features_everywhere(root)
-        wts = worktrees(root)
+        wts = Git(root).worktrees()
         live = {branch for _, branch in wts}
         for wt, branch in wts[1:]:
             f = feats.get(branch)
@@ -1675,13 +1710,13 @@ class Doctor:
                 )
             else:
                 self.check(True, f"worktree {wt}: {branch} ({f.status})")
-        for b in git("for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=root).splitlines():
+        for b in Git(root).run("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines():
             spec = root / "harness" / "features" / b / "spec.md"
             if b != base and b not in live and spec.exists():
                 st = fm_read(spec).get("status", "?")
                 fix = f"git branch -D {b}" if st == "done" else f"herdr worktree open --cwd {root} --branch {b}"
                 self.check(False, f"branch '{b}' has no worktree (its feature is {st} on {base})", fix)
-        for ref in git("for-each-ref", "--format=%(refname)", "refs/harness", cwd=root, check=False).splitlines():
+        for ref in Git(root).run("for-each-ref", "--format=%(refname)", "refs/harness", check=False).splitlines():
             slug = ref.split("/")[2] if ref.count("/") >= 3 else ""
             if slug not in live:
                 self.check(False, f"stale {ref}", f"git update-ref -d {ref}")
@@ -1730,7 +1765,7 @@ class Doctor:
 # ----------------------------------------------------------------------------- commands
 def cmd_config(a):
     """The setup the next feature would run with, for the orchestrator to show the human before `start`."""
-    root = main_checkout(repo_root())
+    root = Git.here().main_checkout()
     cfg = Config.load(root)
     print("harness/config.json")
     print(f"  base_branch        {cfg.base_branch}")
@@ -1761,7 +1796,7 @@ def role_working(role: str, slug: str) -> bool:
 
 
 def cmd_status(a):
-    root = repo_root()
+    root = Git.here().path
     gates = Config.load(root).gates
     feats = features_everywhere(root)
     if not feats:
@@ -1796,7 +1831,7 @@ def cmd_status(a):
 
 
 def cmd_check(a):
-    root = repo_root()
+    root = Git.here().path
     if a.slug:
         slugs = [a.slug]
         if not (feature_dir(root, a.slug) / "spec.md").exists():
@@ -1818,17 +1853,17 @@ def cmd_check(a):
 def start_preconditions(root: Path, cfg: Config, slug: str):
     if not SLUG_RE.match(slug):
         die("slug must match ^[a-z][a-z0-9-]{1,23}$ (lowercase, digits, dashes)")
-    if not is_main_checkout(root):
+    if not Git(root).is_main():
         die("run start from the main checkout, not from a worktree")
-    if current_branch(root) != cfg.base_branch:
-        die(f"run start from the base branch '{cfg.base_branch}' (currently on '{current_branch(root) or 'detached'}')")
-    if ref_exists(f"refs/heads/{slug}", root):
+    if Git(root).branch() != cfg.base_branch:
+        die(f"run start from the base branch '{cfg.base_branch}' (currently on '{Git(root).branch() or 'detached'}')")
+    if Git(root).ref_exists(f"refs/heads/{slug}"):
         die(f"branch '{slug}' already exists")
     if slug in features_everywhere(root):
         die(f"feature '{slug}' already exists (see: harness.py status)")
     if not (root / "harness" / "features" / "_template" / "spec.md").exists():
         die("harness/features/_template/spec.md is missing")
-    if git("status", "--porcelain", cwd=root):
+    if Git(root).dirty():
         print("warning: the base checkout has uncommitted changes; the worktree starts from the last commit")
 
 
@@ -1862,8 +1897,8 @@ def seed_feature(wt: Path, slug: str, intent: str):
     intent = intent or "To be defined with the human: ask what this feature must do before writing requirements."
     for p in fdir.iterdir():
         p.write_text(p.read_text().replace("{{title}}", title).replace("{{slug}}", slug).replace("{{intent}}", intent))
-    git("add", f"harness/features/{slug}", cwd=wt)
-    git("commit", "-q", "-m", f"{slug}: new feature", cwd=wt)
+    Git(wt).run("add", f"harness/features/{slug}")
+    Git(wt).run("commit", "-q", "-m", f"{slug}: new feature")  # everything staged, as before
 
 
 def start_detached(root: Path, cfg: Config, slug: str, res: dict):
@@ -1894,7 +1929,7 @@ def start_detached(root: Path, cfg: Config, slug: str, res: dict):
 
 
 def cmd_start(a):
-    root = repo_root()
+    root = Git.here().path
     cfg = Config.load(root)
     start_preconditions(root, cfg, a.slug)
     res = create_worktree(root, a.slug, cfg.base_branch, a.trust)
@@ -1912,7 +1947,7 @@ def cmd_start(a):
 
 
 def cmd_run(a):
-    root = repo_root()
+    root = Git.here().path
     cfg = Config.load(root)
     f = live_worktree(root, a.slug)
     pid = driver_running(f.wt)
@@ -1932,7 +1967,7 @@ def cmd_run(a):
 
 
 def cmd_wait(a):
-    root = repo_root()
+    root = Git.here().path
     cfg = Config.load(root)
     wt = live_worktree(root, a.slug).wt
     name = agent_name(a.role, a.slug)
@@ -1943,7 +1978,7 @@ def cmd_wait(a):
 
 
 def cmd_approve(a):
-    root = repo_root()
+    root = Git.here().path
     cfg = Config.load(root)
     f = locate(root, a.slug)
     if f.status != "spec_ready":
@@ -1962,14 +1997,14 @@ def cmd_approve(a):
 
 
 def cmd_drive(a):
-    root = repo_root()
+    root = Git.here().path
     cfg = Config.load(root)
     f = live_worktree(root, a.slug)
     pid = driver_running(f.wt)
     if pid:
         die(f"a driver (pid {pid}) is already running {a.slug}")
     if a.tab:
-        pane = launch_driver(main_checkout(root), f.wt, a.slug, a.msg, os.environ.get("HERDR_PANE_ID", ""))
+        pane = launch_driver(Git(root).main_checkout(), f.wt, a.slug, a.msg, os.environ.get("HERDR_PANE_ID", ""))
         print(
             f"driver for {a.slug}: pane {pane}, tab 'driver' of its workspace. It runs the roles one after another "
             "and stops when the feature needs a human; then it prompts this pane (if an agent runs here) "
@@ -1982,18 +2017,18 @@ def cmd_drive(a):
 
 def merge_preconditions(root: Path, cfg: Config, slug: str) -> Feature:
     base = cfg.base_branch
-    if not is_main_checkout(root):
+    if not Git(root).is_main():
         die("run merge from the main checkout, never from inside a worktree")
-    if current_branch(root) != base:
-        die(f"run merge from the base branch '{base}' (currently on '{current_branch(root) or 'detached'}')")
-    if git("status", "--porcelain", cwd=root):
+    if Git(root).branch() != base:
+        die(f"run merge from the base branch '{base}' (currently on '{Git(root).branch() or 'detached'}')")
+    if Git(root).dirty():
         die("the main checkout has uncommitted changes; commit or stash them first")
     f = locate(root, slug)
     if not f.live or f.wt == root:
         die(f"no live worktree on branch '{slug}' (already merged?)")
     if f.status != "review" or f.verdict != "APPROVED":
         die(f"'{slug}' is status={f.status or '?'} verdict={f.verdict or '-'}; need status review and verdict APPROVED")
-    if git("status", "--porcelain", cwd=f.wt):
+    if Git(f.wt).dirty():
         die(f"worktree {f.wt} has uncommitted changes; ask the orchestrator to commit them")
     pid = driver_running(f.wt)
     if pid:
@@ -2003,7 +2038,7 @@ def merge_preconditions(root: Path, cfg: Config, slug: str) -> Feature:
 
 def land(root: Path, wt: Path, slug: str, base: str):
     """Base merged into the branch and checked, the branch merged into the base, the feature marked done."""
-    ok, _ = sync_base(wt, base)
+    ok, _ = Git(wt).merge_in(base)
     if not ok:
         die(
             f"merging '{base}' into '{slug}' conflicts. Run:\n"
@@ -2014,12 +2049,11 @@ def land(root: Path, wt: Path, slug: str, base: str):
     if errs:
         print("\n".join(errs))
         die("check failed on the merged worktree; not merging")
-    git("merge", "--no-ff", "--no-edit", slug, cwd=root)
+    Git(root).run("merge", "--no-ff", "--no-edit", slug)
     spec = feature_dir(root, slug) / "spec.md"
     fm_set(spec, "status", "done")
     rel = spec.relative_to(root)
-    git("add", rel, cwd=root)
-    git("commit", "-q", "-m", f"{slug}: done", "--", rel, cwd=root)
+    Git(root).commit(f"{slug}: done", rel)
 
 
 def remove_worktree(root: Path, wt: Path, slug: str, cfg: Config):
@@ -2027,7 +2061,7 @@ def remove_worktree(root: Path, wt: Path, slug: str, cfg: Config):
     if cfg.teardown_cmd:
         code, out = shell(cfg.teardown_cmd, wt)
         print("teardown_cmd:", "ok" if code == 0 else f"FAILED (exit {code})\n{out[-800:]}")
-    drop_ref(REVIEW_REF.format(slug=slug), root)
+    Git(root).drop_ref(REVIEW_REF.format(slug=slug))
     removed = False
     try:
         ws_id = workspace_of(wt) if shutil.which("herdr") else None
@@ -2037,13 +2071,13 @@ def remove_worktree(root: Path, wt: Path, slug: str, cfg: Config):
     except HerdrError as e:
         print(f"herdr worktree remove failed ({e.code}: {e.message}); falling back to git")
     if not removed:
-        sh(["git", "worktree", "remove", "--force", wt], cwd=root)
-    sh(["git", "worktree", "prune"], cwd=root, check=False)
-    git("branch", "-d", slug, cwd=root)
+        Git(root).proc("worktree", "remove", "--force", wt)
+    Git(root).proc("worktree", "prune", check=False)
+    Git(root).run("branch", "-d", slug)
 
 
 def cmd_merge(a):
-    root = repo_root()
+    root = Git.here().path
     cfg = Config.load(root)
     try:
         f = merge_preconditions(root, cfg, a.slug)
@@ -2054,7 +2088,7 @@ def cmd_merge(a):
             log = root / ".git" / f"harness-merge-{a.slug}.log"
             notify(a.notify, f"harness: {a.slug} merge failed: {e.msg.splitlines()[0]} (log: {log})")
         raise
-    sha = git("rev-parse", "--short", "HEAD", cwd=root)
+    sha = Git(root).run("rev-parse", "--short", "HEAD")
     print(f"merged {a.slug} into {cfg.base_branch} at {sha}; status done; worktree removed; branch deleted")
     if a.notify:
         notify(a.notify, f"harness: {a.slug} merged into {cfg.base_branch} at {sha}")
@@ -2062,7 +2096,7 @@ def cmd_merge(a):
 
 
 def cmd_doctor(a):
-    return Doctor(main_checkout(repo_root()), tests=not a.no_tests, models=a.models).run()
+    return Doctor(Git.here().main_checkout(), tests=not a.no_tests, models=a.models).run()
 
 
 # ----------------------------------------------------------------------------- cli
