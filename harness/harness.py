@@ -35,6 +35,7 @@ from pathlib import Path
 STATUSES = ["pending", "spec_ready", "approved", "in_progress", "review", "done", "blocked"]
 RANK = {"pending": 0, "blocked": 0, "spec_ready": 1, "approved": 2, "in_progress": 3, "review": 4, "done": 5}
 VERDICTS = ("APPROVED", "CHANGES_REQUESTED")
+CHECKPOINTS = 8  # the reviewer checkpoints of docs/sdd.md §5, one `- [x]` each in an APPROVED review.md
 ROLES = {"spec_author": "spec", "implementer": "impl", "reviewer": "rev"}
 DONE_WHEN = {  # on-disk evidence that a role finished its job
     "spec_author": lambda st, vd: st in ("spec_ready", "blocked"),
@@ -47,6 +48,7 @@ FEATURE_FILES = ("spec.md", "tasks.md", "review.md", "log.md")
 TEMPLATE_PATHS = ("harness/", "AGENTS.md", "README.md", "LICENSE", ".gitignore", ".github/", ".worktreeinclude")
 PLACEHOLDER_RE = re.compile(r"<(?!!--)[^<>\n]+>")  # `<what it is ...>` in AGENTS.md §1 until filled in; not comments
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
+BOX_RE = re.compile(r"^- \[[ xX]\]")  # a checkbox line, `- [ ]` or `- [x]`
 TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
 # sdd §3: WHILE/WHEN/WHERE clauses (combinable), an optional `IF ..., THEN`, then `THE <subject> SHALL <response>`
 EARS_RE = re.compile(r"^(?:(?:WHILE|WHEN|WHERE) .+?, )*(?:IF .+?, THEN )?THE \S.*? SHALL \S")
@@ -620,6 +622,17 @@ class FeatureFiles:
     def active(reqs: dict[str, str]) -> dict[str, str]:
         return {k: v for k, v in reqs.items() if v.rstrip(".").strip().lower() != "withdrawn"}
 
+    def verification(self) -> dict[str, list[str]]:
+        """{R id: test files} from the `| R<n> | ... |` rows under ## Verification: the backticked strings of the row,
+        each cut at `::`, without the `<slug>:R<n>` token itself."""
+        rows = {}
+        for line in Markdown.section(self.spec_text(), "Verification"):
+            m = re.match(r"^\|\s*(R\d+)\s*\|(.*)$", line.strip())
+            if m:
+                found = (s.split("::")[0].strip() for s in re.findall(r"`([^`]+)`", m[2]))
+                rows[m[1]] = [s for s in found if s and s != f"{self.slug}:{m[1]}"]
+        return rows
+
     def open_questions(self) -> list[str]:
         return [line for line in Markdown.section(self.spec_text(), "Open questions") if line.strip()]
 
@@ -1135,7 +1148,7 @@ def agent_name(role: str, slug: str) -> str:
 # ----------------------------------------------------------------------------- check
 class Checker:
     """The rules of docs/sdd.md §7 for one feature in one checkout, one method per rule. `errors()` runs those that
-    apply at the feature's status (rules 1-5 and 7-11); rule 6, the tests, is `tests()`."""
+    apply at the feature's status (rules 1-5 and 7-12); rule 6, the tests, is `tests()`."""
 
     def __init__(self, checkout: Path, slug: str, base: str):
         self.files, self.git = FeatureFiles(checkout, slug), Git(checkout)
@@ -1150,16 +1163,16 @@ class Checker:
         if st not in STATUSES:
             return self.status_known(st)
         errs = []
-        if st != "done" and not self.git.is_main():  # rules 7-11 apply to a feature branch
+        if st != "done" and not self.git.is_main():  # rules 7-12 apply to a feature branch
             errs += self.scope(st)
             if vd and self.git.ref_exists(self.ref):
                 errs += self.reviewer_scope()
-            errs += self.verdict_origin(st, vd) + self.frozen_requirements(st)
+            errs += self.verdict_origin(st, vd) + self.review_form(vd) + self.frozen_requirements(st)
         if RANK[st] < 1:
             return errs
-        errs += self.requirements(st) + self.tasks()
+        errs += self.requirements(st) + self.tasks() + self.tokens(at_review=RANK[st] >= 4)
         if RANK[st] >= 4:
-            errs += self.tokens() + self.done()
+            errs += self.done()
         return errs
 
     # --- rule 1
@@ -1223,14 +1236,22 @@ class Checker:
         `<R>x`. Slugs are [a-z0-9-] and ids R<digits>, so neither needs escaping."""
         return f"(^|[^A-Za-z0-9_-]){slug}:{r}([^A-Za-z0-9_]|$)"
 
-    def tokens(self) -> list[str]:
-        """Every active requirement has its `<slug>:R<n>` token somewhere outside harness/ (tracked or not)."""
+    def tokens(self, at_review: bool) -> list[str]:
+        """Every active requirement has a ## Verification row naming its test files; at review, one of those files
+        (tracked or not) carries the `<slug>:R<n>` token."""
         active = FeatureFiles.active(self.files.requirements()[0])
-        errs = []
+        rows, errs = self.files.verification(), []
         for r in sorted(active, key=lambda x: int(x[1:])):
-            grep = ("grep", "--untracked", "-q", "-E", self.token_pattern(self.slug, r), "--", ".", ":!harness")
-            if not self.git.ok(*grep):
-                errs.append(f"{self.slug}: no test carries the token {self.slug}:{r}")
+            files = rows.get(r)
+            if not files:
+                errs.append(f"{self.slug}: {r} has no test file in ## Verification")
+                continue
+            grep = ("grep", "--untracked", "-q", "-E", self.token_pattern(self.slug, r), "--", *files)
+            if at_review and not self.git.ok(*grep):
+                errs.append(
+                    f"{self.slug}: no test named for {r} in ## Verification carries the token {self.slug}:{r} "
+                    f"({', '.join(files)})"
+                )
         return errs
 
     # --- rule 5
@@ -1300,6 +1321,21 @@ class Checker:
             ]
         return []
 
+    # --- rule 12
+    def review_form(self, vd: str) -> list[str]:
+        """An APPROVED review.md ticks every checkpoint of sdd §5 and lists no finding."""
+        if vd != "APPROVED":
+            return []
+        text = Markdown.without_comments(self.files.review.read_text())
+        boxes = [line.strip()[3] for line in Markdown.section(text, "Checked") if BOX_RE.match(line.strip())]
+        findings = [line.strip().removeprefix("- ").strip().lower() for line in Markdown.section(text, "Findings")]
+        ticked, errs = boxes.count("x") + boxes.count("X"), []
+        if ticked != CHECKPOINTS or ticked != len(boxes):
+            errs.append(f"{self.slug}: review.md says APPROVED with {ticked} of {CHECKPOINTS} checkpoints ticked")
+        if [f for f in findings if f] != ["none"]:
+            errs.append(f"{self.slug}: review.md says APPROVED but ## Findings is not 'none'")
+        return errs
+
     @classmethod
     def run(cls, checkout: Path, slugs: list[str], tests: bool | None) -> list[str]:
         """`check`: the rules for each feature, then the tests. tests: None = only if any feature is at review or
@@ -1347,7 +1383,7 @@ class RoleRun:
             return f"worktree {self.wt} has uncommitted changes; a role agent must not start on top of them"
         if role == "reviewer" or (role == "implementer" and vd == "APPROVED"):
             self.files.drop_review()
-        if role == "reviewer":
+        if role == "reviewer" and not self.git.ref_exists(self.ref):  # a redone round keeps where the round started
             self.git.set_ref(self.ref)
         elif role == "implementer":
             self.git.drop_ref(self.ref)
@@ -1378,6 +1414,8 @@ class RoleRun:
             more = " ..." if len(left) > 8 else ""
             errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them")
         errs += Checker(self.wt, slug, self.cfg.base_branch).errors()
+        if errs and role == "reviewer" and vd == "APPROVED" and not left:
+            self.files.drop_review()  # the branch was green before the review: the verdict does not stand, redo it
         if errs:
             return Outcome("NEEDS_ATTENTION", "check fails", errs, state)
         cap = self.cfg.max_review_rounds
