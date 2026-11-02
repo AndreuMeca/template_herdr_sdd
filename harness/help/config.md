@@ -19,35 +19,56 @@ has no model and no cost.
 | `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
 | `max_role_minutes` | no | integer, default `180`, `0` = no limit | When one role run (prompt to settled) takes longer, the driver stops and prompts the orchestrator ("still working after N min"). The agent keeps running; you decide whether to wait (`drive <slug> --tab` again) or stop it. |
 | `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `auto`. |
-| `agents.<role>` | yes, all four | object, below | Which CLI and model run `spec_author`, `implementer`, `reviewer`, and `orchestrator`. The orchestrator entry starts the agent of `start --detach`, and when its kind is `claude` it also sets what the Claude you open in this repo starts with: `config --apply`, run by you, writes its `model` and the permission mode its `args` imply (`--dangerously-skip-permissions` → bypass, `--permission-mode X` → X, else default) to `.claude/settings.local.json`, read at the next session start. Plain `config` only says whether that file matches. |
+| `agents.<role>` | yes, all four | object, below | Which CLI and model run `spec_author`, `implementer`, `reviewer`, and `orchestrator`. The orchestrator entry starts the agent of `start --detach`, and when its kind is `claude` it also sets what the Claude you open in this repo starts with: `config --apply`, run by you, writes its `model` and the Claude Code mode of its `permissions` (ask → default, edits → acceptEdits, guarded → auto, full → bypassPermissions) to `.claude/settings.local.json`, read at the next session start. Plain `config` only says whether that file matches. |
 
 ## `agents.<role>`
+
+You never write a provider's flag for effort or permissions: the file has its own words, and the launcher
+translates them for each CLI. `config` shows both.
 
 | key | required | values | what it does |
 |---|---|---|---|
 | `kind` | yes | a herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
-| `model` | no | a model id the CLI accepts, or `""` | Passed as `--model`; empty = the CLI's default. |
-| `effort` | no | `claude`: `low`, `medium`, `high`, `xhigh`, `max`. `codex`: `minimal`, `low`, `medium`, `high`, `xhigh`. Or `""` | The reasoning effort, translated per CLI (`--effort` for Claude Code, `-c model_reasoning_effort=` for Codex). Empty = the CLI's default. Ignored for other CLIs; `config` says so. |
-| `args` | no | list of strings | Extra flags, verbatim, except that `{repo}` becomes the main checkout's absolute path (so the file stays the same on every machine). Role agents need the non-interactive permission flag or they stop at the first dialog. |
+| `model` | no | the provider's model id, or `""` | Passed as `--model`; empty = the CLI's default. Kept as the provider names it, so you always see what you pay for; `doctor --models` checks it. |
+| `effort` | no | `low`, `medium`, `high`, `extra`, `max`, or `""` | How hard the model thinks, translated per CLI (table below). Empty = the CLI's default. |
+| `permissions` | yes for the three roles; no for the orchestrator | `ask`, `edits`, `guarded`, `full` | What the agent may do without asking (table below). Roles run unattended, so they must be `guarded` or `full`. A missing orchestrator value = the CLI's default. |
+| `args` | no | list of strings | Any other flag, verbatim (`{repo}` becomes the main checkout's absolute path, so the file stays the same on every machine). Not a permission flag when `permissions` is set: `config` rejects that. |
 
-herdr only passes model and flags through; check `<cli> --help`. The launcher answers Claude Code's
-two startup dialogs (trust folder, bypass-permissions warning) itself; any other dialog is reported.
+**effort**, by meaning; where a CLI has no such level it gets its nearest one:
+
+| ours | claude (`--effort`) | codex (`-c model_reasoning_effort=`) | pi (`--thinking`) |
+|---|---|---|---|
+| `low` | low | low | low |
+| `medium` | medium | medium | medium |
+| `high` | high | high | high |
+| `extra` | xhigh | xhigh | xhigh |
+| `max` | max | xhigh (its highest) | max |
+
+**permissions**, by what the agent does:
+
+| ours | the agent | claude | codex | pi |
+|---|---|---|---|---|
+| `ask` | asks before edits and commands | `--permission-mode manual` | `--sandbox workspace-write --ask-for-approval on-request` | — |
+| `edits` | edits files freely, asks before commands | `--permission-mode acceptEdits` | — | — |
+| `guarded` | never asks; the CLI blocks risky actions | `--permission-mode auto` (a classifier reviews each action) | `--sandbox workspace-write --ask-for-approval never --add-dir {repo}/.git` (writes only in its worktree, plus the git dir it needs to commit) | — |
+| `full` | never asks, no limits | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | (pi never asks) |
+
+A level a CLI does not have (—) is a config error that names the levels it does have. `guarded` means the
+same promise through different mechanisms; `full` is only for a machine you would not mind an agent
+breaking. What either means for the harness: `harness/docs/sdd.md` §9. For a CLI not in these tables
+(`gemini`, `opencode`, ...), `effort` and `permissions` are not translated: `config` says so, and its own
+flags go in `args` (Gemini CLI: `--yolo`).
+
+herdr only passes model and flags through. The launcher answers Claude Code's two startup dialogs (trust
+folder, bypass-permissions warning) itself; any other dialog is reported.
 
 Ready-to-copy entries:
 ```json
-{ "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] }
-{ "kind": "claude", "model": "claude-opus-5-5",   "args": ["--permission-mode", "acceptEdits"] }
-{ "kind": "codex",  "model": "",                  "args": ["--sandbox", "workspace-write", "--ask-for-approval", "never", "--add-dir", "{repo}/.git"] }
-{ "kind": "pi",     "model": "anthropic/claude-sonnet-5-5", "args": [] }
+{ "kind": "claude", "model": "claude-sonnet-5-5", "effort": "high",  "permissions": "full" }
+{ "kind": "claude", "model": "claude-opus-5-5",   "effort": "extra", "permissions": "guarded" }
+{ "kind": "codex",  "model": "",                  "effort": "extra", "permissions": "guarded" }
+{ "kind": "pi",     "model": "anthropic/claude-sonnet-5-5", "effort": "medium", "permissions": "full" }
 ```
-`--permission-mode acceptEdits` still asks before shell commands: fine for a detached orchestrator you
-watch, not for roles. Codex with `--sandbox workspace-write` (the shipped reviewer) writes only inside its
-worktree plus the dirs given with `--add-dir`. It needs `{repo}/.git` there, because a worktree's git dir
-lives in the main checkout; without it Codex cannot commit and the driver stops at the merge gate with
-"uncommitted changes left behind". Codex's `--dangerously-bypass-approvals-and-sandbox` drops the sandbox
-altogether: only on a disposable machine. pi never asks. Other CLIs are unverified; put their
-non-interactive flag (Gemini CLI: `--yolo`) in `args`. What a permission flag means for the harness:
-`harness/docs/sdd.md` §9.
 
 ## herdr's sidebar
 
