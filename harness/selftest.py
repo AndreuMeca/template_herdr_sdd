@@ -816,6 +816,7 @@ class CheckRules(Case):
             "feat: R1 still has the template placeholder <trigger>",
             "feat: R2 still has the template placeholder <unwanted condition>",
             "feat: T1 still has the template placeholder <task>",
+            "feat: R1 in ## Verification still has the template placeholder <test file>",
             "feat: T2 still has the template placeholder <task>",
         ):
             self.assertIn(err, errs)
@@ -1244,7 +1245,8 @@ class Commands(Case):
         self.assertNotIn("settings.local.json", out)
         self.assertIn("copy_files         .env", out)
 
-    def test_start_creates_the_feature(self):
+    def start(self, launch_driver):
+        """`start newf` from the main checkout, herdr creating the worktree at tmp/wt-new."""
         self.chdir(self.r.root)
 
         def create(root, slug, base, trust):
@@ -1253,11 +1255,26 @@ class Commands(Case):
             return {"worktree": {"path": str(path)}, "workspace": {"workspace_id": "w9"}}
 
         self.stub_herdr("create_worktree", create)
-        code, out = self.output(h.cmd_start, Namespace(slug="newf", intent="do y", trust=False))
+        self.stub_herdr("launch_driver", launch_driver)
+        return self.output(h.cmd_start, Namespace(slug="newf", intent="do y", trust=False))
+
+    def test_start_creates_the_feature_and_starts_its_driver(self):
+        launched = []
+        code, out = self.start(lambda root, wt, slug, msg, pane: launched.append((wt, slug, msg)) or "p7")
         self.assertEqual(code, 0)
         self.assertTrue((self.r.tmp / "wt-new" / "harness" / "features" / "newf" / "spec.md").exists())
-        self.assertIn("next: harness.py drive newf --tab", out)
+        self.assertEqual(launched, [(self.r.tmp / "wt-new", "newf", "")])
+        self.assertIn("driver for newf: pane p7", out)
         self.assertFalse((self.r.root / ".claude").exists(), "nothing tool-specific is written")
+
+    def test_start_says_how_to_drive_when_the_driver_cannot_start(self):
+        def fail(*args):
+            raise h.HerdrError("driver_not_started", "no driver")
+
+        with self.assertRaises(h.Die) as cm:
+            self.start(fail)
+        self.assertIn("start its driver: harness.py drive newf --tab", cm.exception.msg)
+        self.assertTrue((self.r.tmp / "wt-new" / "harness" / "features" / "newf" / "spec.md").exists())
 
     def test_check_command_finds_the_worktree(self):
         self.chdir(self.r.root)

@@ -94,7 +94,7 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 | 1 | `status` in `spec.md` is one of the lifecycle table | always |
 | 2 | at least one active R, ids unique, each with exactly one `SHALL` in an EARS pattern (§3) and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
 | 3 | every task cites an existing R and keeps no template placeholder (`<task>`); every active R is cited by a task | `spec_ready` |
-| 4 | every active R has a `## Verification` row naming a test file; at `review`, one of those files carries its `<slug>:R<n>` token (`git grep --untracked`) | `spec_ready` |
+| 4 | every active R has a `## Verification` row naming a test file, no template placeholder (`<test file>`); at `review`, one of those files carries its `<slug>:R<n>` token (`git grep --untracked`) | `spec_ready` |
 | 5 | every task ticked and `log.md` exists | `review` |
 | 6 | `test_cmd` exits 0 | `review`, or `--tests` |
 | 7 | nothing under `harness/` changed outside the feature folder (branch vs base, plus uncommitted and untracked files) | always, on a feature branch |

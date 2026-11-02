@@ -18,8 +18,8 @@ status: pending
 <!-- One row per R; the test carries the token {{slug}}:R<n> (sdd §4). -->
 | R  | Test |
 |----|------|
-| R1 | `tests/test_{{slug}}.py::test_...`  (`{{slug}}:R1`) |
-| R2 | `tests/test_{{slug}}.py::test_...`  (`{{slug}}:R2`) |
+| R1 | `<test file>` (`{{slug}}:R1`) |
+| R2 | `<test file>` (`{{slug}}:R2`) |
 
 ## Open questions
 <!-- Empty at spec_ready; anything here means status blocked. -->
