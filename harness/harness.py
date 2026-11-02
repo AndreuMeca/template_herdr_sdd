@@ -3,18 +3,15 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/run/wait/drive/merge also need herdr.
+"""SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/drive/merge also need herdr.
 
-  harness.py config                        the setup in a few lines: roles, models, gates, commands (anyone)
   harness.py status                        board across every worktree, grouped by whose move it is (anyone)
   harness.py start <slug> ["intent"]       new worktree + branch + feature folder (orchestrator or human, base branch)
   harness.py drive <slug> ["msg"] --tab    run the whole loop in a `driver` tab until a human is needed (orchestrator)
-  harness.py run <role> <slug> ["msg"]     run one role agent in the feature's worktree (orchestrator, from anywhere)
-  harness.py wait <role> <slug>            keep waiting for a running role agent        (orchestrator)
   harness.py approve <slug>                approve a spec; the driver continues            (human)
   harness.py merge <slug>                  merge an approved, reviewed feature          (human, base branch)
   harness.py check [slug] [--tests]        structural checks (+ tests)                  (everyone)
-  harness.py doctor                        tools, config, leftovers                     (anyone)
+  harness.py doctor                        the setup, then tools, config, tests, leftovers (anyone)
 
 Rules: harness/docs/sdd.md. Config: harness/config.json. Own tests: python3 harness/selftest.py.
 """
@@ -38,12 +35,8 @@ from pathlib import Path
 STATUSES = ["pending", "spec_ready", "approved", "in_progress", "review", "done", "blocked"]
 RANK = {"pending": 0, "blocked": 0, "spec_ready": 1, "approved": 2, "in_progress": 3, "review": 4, "done": 5}
 VERDICTS = ("APPROVED", "CHANGES_REQUESTED")
+CHECKPOINTS = 8  # the reviewer checkpoints of docs/sdd.md §5, one `- [x]` each in an APPROVED review.md
 ROLES = {"spec_author": "spec", "implementer": "impl", "reviewer": "rev"}
-RUN_GATE = {
-    "spec_author": {"pending", "spec_ready", "blocked"},
-    "implementer": {"approved", "in_progress", "review", "blocked"},
-    "reviewer": {"review"},
-}
 DONE_WHEN = {  # on-disk evidence that a role finished its job
     "spec_author": lambda st, vd: st in ("spec_ready", "blocked"),
     "implementer": lambda st, vd: st in ("review", "blocked"),
@@ -55,18 +48,20 @@ FEATURE_FILES = ("spec.md", "tasks.md", "review.md", "log.md")
 TEMPLATE_PATHS = ("harness/", "AGENTS.md", "README.md", "LICENSE", ".gitignore", ".github/", ".worktreeinclude")
 PLACEHOLDER_RE = re.compile(r"<(?!!--)[^<>\n]+>")  # `<what it is ...>` in AGENTS.md §1 until filled in; not comments
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
+BOX_RE = re.compile(r"^- \[[ xX]\]")  # a checkbox line, `- [ ]` or `- [x]`
 TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
 # sdd §3: WHILE/WHEN/WHERE clauses (combinable), an optional `IF ..., THEN`, then `THE <subject> SHALL <response>`
 EARS_RE = re.compile(r"^(?:(?:WHILE|WHEN|WHERE) .+?, )*(?:IF .+?, THEN )?THE \S.*? SHALL \S")
 EARS_HINT = "THE ... SHALL / WHEN|WHILE|WHERE ..., THE ... SHALL / IF ..., THEN THE ... SHALL"
 # the example placeholders of harness/features/_template/: a requirement or task still holding one was never written
 TEMPLATE_PLACEHOLDERS = ("<trigger>", "<response>", "<unwanted condition>", "<task>")
-EXIT_DONE, EXIT_ERROR, EXIT_ATTENTION, EXIT_WORKING = 0, 1, 2, 3
-DEFAULT_TIMEOUT_MS = 100_000  # below Claude Code's 120 s default shell timeout
+EXIT_DONE, EXIT_ERROR, EXIT_ATTENTION = 0, 1, 2
 DRIVE_WAIT_MS = 300_000  # the driver waits for a role in slices of this length
 DEFAULT_ROLE_MINUTES = 180  # the driver stops for a human when one role run takes longer (max_role_minutes)
 FIX_TRIES = 3  # how often the driver sends a failed check back to the same role before stopping
-REVIEW_REF = "refs/harness/{slug}/review-start"  # set by `run reviewer`, dropped by `run implementer` and `merge`
+REVIEW_REF = (
+    "refs/harness/{slug}/review-start"  # set before a reviewer round, dropped by an implementer round and `merge`
+)
 SYNC_MSG = (
     "The base branch '{base}' was merged into this branch and the merge conflicts. "
     "Resolve the conflicts, keep `check --tests` green, commit."
@@ -91,7 +86,7 @@ class Cli:
     effort_flag: tuple  # the flag(s) for a reasoning effort, "{}" standing for the CLI's own level
     efforts: dict  # our effort level -> the CLI's
     permissions: dict  # our permission level -> the CLI's flags; a level missing here is one the CLI lacks
-    guarded_by: str = ""  # what limits the agent under `guarded`, for `config` to say
+    guarded_by: str = ""  # what limits the agent under `guarded`, for `doctor` to say
     probe: tuple = ()  # a one-shot command for `doctor --models`; "{model}" and "{prompt}" are filled in
     startup_dialogs: tuple = ()  # screen text of first-run dialogs the launcher accepts (option below the default)
 
@@ -336,7 +331,7 @@ class AgentConfig:
 
     def cli_args(self, repo: Path) -> list:
         """The CLI flags after `--`: model, effort, permissions (translated by its Cli; a CLI not in CLIS gets
-        neither, `config` says so), then `args` verbatim. `{repo}` in any of them becomes the main checkout's path."""
+        neither, `doctor` says so), then `args` verbatim. `{repo}` in any of them becomes the main checkout's path."""
         cli = self.cli
         model = ["--model", self.model] if self.model else []
         flags = [*cli.effort_args(self.effort), *cli.permission_args(self.permissions)] if cli else []
@@ -344,7 +339,7 @@ class AgentConfig:
         return ["--", *model, *flags] if (model or flags) else []
 
     def describe(self) -> list[str]:
-        """How `config` shows its effort and permissions: our words, then what its CLI is given."""
+        """How `doctor` shows its effort and permissions: our words, then what its CLI is given."""
         cli, effort, perm = self.cli, self.effort, self.permissions
         if not effort:
             e = "effort       - (the CLI's default)"
@@ -626,6 +621,17 @@ class FeatureFiles:
     @staticmethod
     def active(reqs: dict[str, str]) -> dict[str, str]:
         return {k: v for k, v in reqs.items() if v.rstrip(".").strip().lower() != "withdrawn"}
+
+    def verification(self) -> dict[str, list[str]]:
+        """{R id: test files} from the `| R<n> | ... |` rows under ## Verification: the backticked strings of the row,
+        each cut at `::`, without the `<slug>:R<n>` token itself."""
+        rows = {}
+        for line in Markdown.section(self.spec_text(), "Verification"):
+            m = re.match(r"^\|\s*(R\d+)\s*\|(.*)$", line.strip())
+            if m:
+                found = (s.split("::")[0].strip() for s in re.findall(r"`([^`]+)`", m[2]))
+                rows[m[1]] = [s for s in found if s and s != f"{self.slug}:{m[1]}"]
+        return rows
 
     def open_questions(self) -> list[str]:
         return [line for line in Markdown.section(self.spec_text(), "Open questions") if line.strip()]
@@ -997,26 +1003,18 @@ class Herdr:
         except HerdrError:
             return "gone"
 
-    def working(self, name: str) -> bool:
-        return self.available() and self.state(name) == "working"
-
-    def tail(self, name: str, lines: int = 40) -> str:
+    def screen(self, name: str, lines: int = 40) -> str:
+        """The agent's recent output; empty when herdr cannot read it."""
         try:
             res = self.call("agent", "read", name, "--source", "recent-unwrapped", "--lines", lines)
-        except HerdrError as e:
-            return f"(agent read failed: {e})"
+        except HerdrError:
+            return ""
         if "raw" in res:
             return res["raw"]
         text = self.find_key(res, "text") or self.find_key(res, "lines") or self.find_key(res, "content")
         if isinstance(text, list):
             text = "\n".join(str(t) for t in text)
         return str(text) if text else json.dumps(res)[:2000]
-
-    def screen(self, name: str, lines: int = 40) -> str:
-        try:
-            return self.tail(name, lines)
-        except Exception:
-            return ""
 
     def settle_startup(self, name: str, agent: AgentConfig, timeout_s: int = 60) -> bool:
         """Answer the startup dialogs its CLI is known to show (Cli.startup_dialogs: Claude Code's trust-folder and
@@ -1123,10 +1121,10 @@ class Herdr:
             f"the driver did not start in pane {pane}; look at it: herdr pane read {pane} --lines 40",
         )
 
-    def resume(self, root: Path, wt: Path, slug: str, text: str) -> int:
+    def resume(self, root: Path, wt: Path, slug: str) -> int:
         """After a human gate: relaunch the driver in its tab, else say what to run."""
         if not self.available():
-            print(f"next (inside herdr): harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
+            print(f"next (inside herdr): harness.py drive {slug} --tab")
             return 0
         try:
             ws_id = self.workspace_of(wt)
@@ -1136,7 +1134,7 @@ class Herdr:
                 return 0
         except HerdrError as e:
             print(f"warning: could not resume the driver ({e.code}: {e.message})")
-        print(f"next: harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
+        print(f"next: harness.py drive {slug} --tab")
         return 0
 
 
@@ -1150,7 +1148,7 @@ def agent_name(role: str, slug: str) -> str:
 # ----------------------------------------------------------------------------- check
 class Checker:
     """The rules of docs/sdd.md §7 for one feature in one checkout, one method per rule. `errors()` runs those that
-    apply at the feature's status (rules 1-5 and 7-11); rule 6, the tests, is `tests()`."""
+    apply at the feature's status (rules 1-5 and 7-12); rule 6, the tests, is `tests()`."""
 
     def __init__(self, checkout: Path, slug: str, base: str):
         self.files, self.git = FeatureFiles(checkout, slug), Git(checkout)
@@ -1165,16 +1163,16 @@ class Checker:
         if st not in STATUSES:
             return self.status_known(st)
         errs = []
-        if st != "done" and not self.git.is_main():  # rules 7-11 apply to a feature branch
+        if st != "done" and not self.git.is_main():  # rules 7-12 apply to a feature branch
             errs += self.scope(st)
             if vd and self.git.ref_exists(self.ref):
                 errs += self.reviewer_scope()
-            errs += self.verdict_origin(st, vd) + self.frozen_requirements(st)
+            errs += self.verdict_origin(st, vd) + self.review_form(vd) + self.frozen_requirements(st)
         if RANK[st] < 1:
             return errs
-        errs += self.requirements(st) + self.tasks()
+        errs += self.requirements(st) + self.tasks() + self.tokens(at_review=RANK[st] >= 4)
         if RANK[st] >= 4:
-            errs += self.tokens() + self.done()
+            errs += self.done()
         return errs
 
     # --- rule 1
@@ -1238,14 +1236,22 @@ class Checker:
         `<R>x`. Slugs are [a-z0-9-] and ids R<digits>, so neither needs escaping."""
         return f"(^|[^A-Za-z0-9_-]){slug}:{r}([^A-Za-z0-9_]|$)"
 
-    def tokens(self) -> list[str]:
-        """Every active requirement has its `<slug>:R<n>` token somewhere outside harness/ (tracked or not)."""
+    def tokens(self, at_review: bool) -> list[str]:
+        """Every active requirement has a ## Verification row naming its test files; at review, one of those files
+        (tracked or not) carries the `<slug>:R<n>` token."""
         active = FeatureFiles.active(self.files.requirements()[0])
-        errs = []
+        rows, errs = self.files.verification(), []
         for r in sorted(active, key=lambda x: int(x[1:])):
-            grep = ("grep", "--untracked", "-q", "-E", self.token_pattern(self.slug, r), "--", ".", ":!harness")
-            if not self.git.ok(*grep):
-                errs.append(f"{self.slug}: no test carries the token {self.slug}:{r}")
+            files = rows.get(r)
+            if not files:
+                errs.append(f"{self.slug}: {r} has no test file in ## Verification")
+                continue
+            grep = ("grep", "--untracked", "-q", "-E", self.token_pattern(self.slug, r), "--", *files)
+            if at_review and not self.git.ok(*grep):
+                errs.append(
+                    f"{self.slug}: no test named for {r} in ## Verification carries the token {self.slug}:{r} "
+                    f"({', '.join(files)})"
+                )
         return errs
 
     # --- rule 5
@@ -1315,6 +1321,21 @@ class Checker:
             ]
         return []
 
+    # --- rule 12
+    def review_form(self, vd: str) -> list[str]:
+        """An APPROVED review.md ticks every checkpoint of sdd §5 and lists no finding."""
+        if vd != "APPROVED":
+            return []
+        text = Markdown.without_comments(self.files.review.read_text())
+        boxes = [line.strip()[3] for line in Markdown.section(text, "Checked") if BOX_RE.match(line.strip())]
+        findings = [line.strip().removeprefix("- ").strip().lower() for line in Markdown.section(text, "Findings")]
+        ticked, errs = boxes.count("x") + boxes.count("X"), []
+        if ticked != CHECKPOINTS or ticked != len(boxes):
+            errs.append(f"{self.slug}: review.md says APPROVED with {ticked} of {CHECKPOINTS} checkpoints ticked")
+        if [f for f in findings if f] != ["none"]:
+            errs.append(f"{self.slug}: review.md says APPROVED but ## Findings is not 'none'")
+        return errs
+
     @classmethod
     def run(cls, checkout: Path, slugs: list[str], tests: bool | None) -> list[str]:
         """`check`: the rules for each feature, then the tests. tests: None = only if any feature is at review or
@@ -1333,16 +1354,15 @@ class Checker:
 class Outcome:
     """How a role run ended, judged from the files on disk and a green check, never from the agent's screen alone."""
 
-    result: str  # DONE | STILL_WORKING | NEEDS_ATTENTION
+    result: str  # DONE | NEEDS_ATTENTION
     note: str
     errors: list
     agent_state: str
 
 
 class RoleRun:
-    """One role agent's run on one feature in its worktree: what stops it from starting (and the branch preparation
-    before it does), the prompt it gets, and whether what it left on disk means it is done. Used by the driver and by
-    `run` / `wait`."""
+    """One role agent's run on one feature in its worktree, for the driver: the branch preparation before it starts,
+    the prompt it gets, and whether what it left on disk means it is done."""
 
     def __init__(self, cfg: Config, root: Path, wt: Path, role: str, slug: str):
         self.cfg, self.root, self.wt, self.role, self.slug = cfg, root, Path(wt), role, slug
@@ -1355,36 +1375,15 @@ class RoleRun:
         text = f"Read harness/roles/{role}.md and follow it for harness/features/{slug}/."
         return text + (" " + " ".join(msg.split()) if msg else "")
 
-    def blocker(self, st: str, vd: str, tests_always: bool = False) -> str | None:
-        """What stops the role from starting now, or None. Prepares the branch: before a review the base branch is
-        merged in and the result checked; the review ref marks where the reviewer starts; a new implementer round
-        drops it."""
-        role, slug, base = self.role, self.slug, self.cfg.base_branch
-        if st not in RUN_GATE[role]:
-            allowed = ", ".join(sorted(RUN_GATE[role]))
-            nxt = next_action(st, vd, self.cfg.gates)
-            return f"cannot run {role} while status is '{st or '(none)'}' (allowed: {allowed}); next: {nxt}"
+    def prepare(self, vd: str) -> str | None:
+        """Get the branch ready for the role, or say why it cannot start. The review ref marks where a reviewer starts
+        (the driver has merged the base branch in and checked it already); a new implementer round drops it."""
+        role = self.role
         if self.git.dirty():
             return f"worktree {self.wt} has uncommitted changes; a role agent must not start on top of them"
-        if HERDR.state(self.name) == "working":
-            return f"{self.name} is still working; wait for it: harness.py wait {role} {slug}"
-        if role == "reviewer":
-            ok, moved = self.git.merge_in(base)
-            if not ok:
-                fix = f'harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"'
-                return f"merging '{base}' into '{slug}' conflicts; run: {fix}"
-            if moved or tests_always:
-                errs = Checker.run(self.wt, [slug], True)
-                if errs:
-                    why = f" after merging '{base}'" if moved else ""
-                    return (
-                        f"check --tests fails on '{slug}'{why}:\n"
-                        + "\n".join(errs)
-                        + f'\nrun: harness.py run implementer {slug} "check --tests fails; fix it, commit"'
-                    )
         if role == "reviewer" or (role == "implementer" and vd == "APPROVED"):
             self.files.drop_review()
-        if role == "reviewer":
+        if role == "reviewer" and not self.git.ref_exists(self.ref):  # a redone round keeps where the round started
             self.git.set_ref(self.ref)
         elif role == "implementer":
             self.git.drop_ref(self.ref)
@@ -1395,15 +1394,13 @@ class RoleRun:
         text = self.prompt_for(self.role, self.slug, msg)
         return HERDR.prompt_or_start(self.root, self.wt, self.role, self.slug, text, timeout_ms, self.agent)
 
-    def outcome(self, settled: bool, note: str) -> Outcome:
+    def outcome(self, note: str) -> Outcome:
         """DONE needs the on-disk evidence AND a green structural check; a reviewer whose CHANGES_REQUESTED is the
         max_review_rounds-th blocks the feature for the human."""
         role, slug = self.role, self.slug
         st, vd = self.files.state()
         state = HERDR.state(self.name)
         errs: list[str] = []
-        if not settled:
-            return Outcome("STILL_WORKING", note, errs, state)
         if state == "blocked" or note:
             return Outcome("NEEDS_ATTENTION", note, errs, state)
         if not DONE_WHEN[role](st, vd):
@@ -1417,6 +1414,8 @@ class RoleRun:
             more = " ..." if len(left) > 8 else ""
             errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them")
         errs += Checker(self.wt, slug, self.cfg.base_branch).errors()
+        if errs and role == "reviewer" and vd == "APPROVED" and not left:
+            self.files.drop_review()  # the branch was green before the review: the verdict does not stand, redo it
         if errs:
             return Outcome("NEEDS_ATTENTION", "check fails", errs, state)
         cap = self.cfg.max_review_rounds
@@ -1431,31 +1430,6 @@ class RoleRun:
             self.git.drop_ref(self.ref)
             return Outcome("NEEDS_ATTENTION", f"blocked after {cap} review rounds", errs, state)
         return Outcome("DONE", note, errs, state)
-
-    def report(self, settled: bool, note: str) -> int:
-        """`run` / `wait`: print the outcome, the agent's last output and what to do next; the exit code."""
-        role, slug, name = self.role, self.slug, self.name
-        out = self.outcome(settled, note)
-        st, vd = self.files.state()
-        tail = f" [{out.note}]" if out.note else ""
-        print(f"{name}: state={out.agent_state} status={st or '?'} verdict={vd or '-'} -> {out.result}{tail}")
-        if out.result == "STILL_WORKING":
-            print(f"next: harness.py wait {role} {slug}")
-            return EXIT_WORKING
-        if out.errors:
-            print("\n".join(out.errors))
-        print("--- last output ---")
-        print(HERDR.tail(name).rstrip())
-        print("---")
-        HERDR.sidebar(self.wt, state_text(st, vd, self.cfg.gates))
-        if out.result == "DONE":
-            print(f"next: {next_action(st, vd, self.cfg.gates)}")
-            return EXIT_DONE
-        if out.errors:
-            print(f'send it back: harness.py run {role} {slug} "check fails: <the lines above>; fix, commit"')
-        print(f"inspect: herdr agent read {name} --source recent-unwrapped --lines 120")
-        print(f"answer a dialog: herdr agent send-keys {name} <key>   (or ask the human)")
-        return EXIT_ATTENTION
 
 
 # ----------------------------------------------------------------------------- driver
@@ -1524,7 +1498,7 @@ class Driver:
             self.msg = text
             return
         st, vd = self.files.state()
-        err = RoleRun(self.cfg, self.root, self.wt, role, self.slug).blocker(st, vd)
+        err = RoleRun(self.cfg, self.root, self.wt, role, self.slug).prepare(vd)
         if err:
             self.stop(f"cannot run {role}: {err}", EXIT_ERROR)
         self.run_role(role, text, st, vd)
@@ -1617,7 +1591,7 @@ class Driver:
         HERDR.sidebar(self.wt, state_text(st, vd, self.gates, running=role))
         started = time.time()
         settled, note = run.send(text, DRIVE_WAIT_MS)
-        out = run.outcome(True, self.wait_role(role, settled, note, started))
+        out = run.outcome(self.wait_role(role, settled, note, started))
         note, errs = out.note, out.errors
         self.log(f"{run.name}: state={out.agent_state} -> {out.result}" + (f" [{note}]" if note else ""))
         if errs:
@@ -1671,7 +1645,7 @@ def probe_model(cli: Cli, model: str, cwd: Path, timeout_s: int = 120) -> tuple[
 
 
 class Doctor:
-    """Tools, config and leftovers of the repo at `root` (its main checkout). `run()` prints the report."""
+    """The setup, then tools, config and leftovers of the repo at `root` (its main checkout). `run()` prints it."""
 
     def __init__(self, root: Path, tests: bool = True, models: bool = False):
         self.root, self.tests, self.models = root, tests, models
@@ -1683,12 +1657,37 @@ class Doctor:
         if not cond:
             self.problems.append(msg)
 
+    @staticmethod
+    def setup(cfg: Config):
+        """The setup the next feature runs with, for the orchestrator to show the human before `start`."""
+        print("harness/config.json")
+        print(f"  base_branch        {cfg.base_branch}")
+        print(f"  test_cmd           {cfg.test_cmd}")
+        print(f"  setup_cmd          {cfg.setup_cmd or '-'}")
+        print(f"  teardown_cmd       {cfg.teardown_cmd or '-'}")
+        print(f"  copy_files         {', '.join(cfg.copy_files) or '-'}")
+        print(f"  max_review_rounds  {cfg.max_review_rounds or 'no limit'}")
+        print(f"  max_role_minutes   {cfg.max_role_minutes or 'no limit'}")
+        print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
+        for role in ROLES:
+            agent = cfg.agent(role)
+            kind, model = agent.harness, agent.model or "(default model)"
+            missing = "   <- not in PATH" if not shutil.which(kind) else ""
+            print(f"  {role:<18} {kind:<7} {model}{missing}")
+            for line in agent.describe():
+                print(f"  {'':<18} {line}")
+        print("  effort: " + " < ".join(EFFORT_LEVELS) + "   permissions: " + ", ".join(PERMISSION_LEVELS))
+        print("  orchestrator       the agent you started (not in this file): its model and permissions are its own")
+        print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
+
     def run(self) -> int:
+        cfg = Config.load(self.root)  # dies naming the problem when the file is not valid
+        self.setup(cfg)
+        print()
         self.check(shutil.which("git") is not None, "git in PATH")
         self.check(Herdr.available(), "herdr in PATH", "https://herdr.dev/docs/install/")
         if shutil.which("uv") is None:
             self.notes.append("uv is not in PATH; run the launcher as `python3 harness/harness.py ...`")
-        cfg = Config.load(self.root)
         self.check(True, "harness/config.json is valid")
         self.config(cfg)
         self.project_section()
@@ -1841,36 +1840,6 @@ class Doctor:
 
 
 # ----------------------------------------------------------------------------- commands
-def cmd_config(a):
-    """The setup the next feature would run with, for the orchestrator to show the human before `start`."""
-    root = Git.here().main_checkout()
-    cfg = Config.load(root)
-    print("harness/config.json")
-    print(f"  base_branch        {cfg.base_branch}")
-    print(f"  test_cmd           {cfg.test_cmd}")
-    print(f"  setup_cmd          {cfg.setup_cmd or '-'}")
-    print(f"  teardown_cmd       {cfg.teardown_cmd or '-'}")
-    print(f"  copy_files         {', '.join(cfg.copy_files) or '-'}")
-    print(f"  max_review_rounds  {cfg.max_review_rounds or 'no limit'}")
-    print(f"  max_role_minutes   {cfg.max_role_minutes or 'no limit'}")
-    print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
-    for role in ROLES:
-        agent = cfg.agent(role)
-        kind, model = agent.harness, agent.model or "(default model)"
-        missing = "   <- not in PATH" if not shutil.which(kind) else ""
-        print(f"  {role:<18} {kind:<7} {model}{missing}")
-        for line in agent.describe():
-            print(f"  {'':<18} {line}")
-    print("  effort: " + " < ".join(EFFORT_LEVELS) + "   permissions: " + ", ".join(PERMISSION_LEVELS))
-    print("  orchestrator       the agent you started (not in this file): its model and permissions are its own")
-    print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
-    return 0
-
-
-def role_working(role: str, slug: str) -> bool:
-    return HERDR.working(agent_name(role, slug))
-
-
 def cmd_status(a):
     root = Git.here().path
     gates = Config.load(root).gates
@@ -1889,10 +1858,8 @@ def cmd_status(a):
             group = "needs you"
         elif f.live and DriverLock(f.wt).running():
             group, nxt = "working", nxt + "  (driver running)"
-        elif f.live and nxt.startswith("run ") and role_working(nxt[4:], slug):
-            group, nxt = "working", nxt + "  (agent working)"
         else:
-            group = "to run"  # nothing runs on its own: the orchestrator starts the driver or the role
+            group = "to run"  # nothing runs on its own: the orchestrator starts the driver
         groups[group].append((slug, f.status or "?", f.verdict or "-", where, nxt))
     print(" · ".join(f"{len(v)} {k}" for k, v in groups.items() if v))
     header = ("SLUG", "STATUS", "VERDICT", "BRANCH@PATH", "NEXT")
@@ -1966,37 +1933,8 @@ def cmd_start(a):
     HERDR.sidebar(wt, state_text("pending", "", cfg.gates))
     ws_id = res["workspace"]["workspace_id"]
     print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")
-    print(f"next: harness.py drive {a.slug} --tab   (or one role at a time: harness.py run spec_author {a.slug})")
+    print(f"next: harness.py drive {a.slug} --tab")
     return 0
-
-
-def cmd_run(a):
-    root = Git.here().path
-    cfg = Config.load(root)
-    f = Feature.live_one(root, a.slug)
-    pid = DriverLock(f.wt).running()
-    if pid:
-        die(
-            f"a driver (pid {pid}) is running {a.slug} and starts the roles itself; "
-            f"stop it first (kill {pid}) to run one by hand"
-        )
-    run = RoleRun(cfg, root, f.wt, a.role, a.slug)
-    err = run.blocker(f.status, f.verdict)
-    if err:
-        die(err)
-    HERDR.sidebar(f.wt, state_text(f.status, f.verdict, cfg.gates, running=a.role))
-    settled, note = run.send(a.msg, a.timeout)
-    return run.report(settled, note)
-
-
-def cmd_wait(a):
-    root = Git.here().path
-    cfg = Config.load(root)
-    run = RoleRun(cfg, root, Feature.live_one(root, a.slug).wt, a.role, a.slug)
-    settled, note = HERDR.wait(run.name, a.timeout)
-    if note == "agent_not_found":
-        die(f"no agent '{run.name}'; start it with: harness.py run {a.role} {a.slug}")
-    return run.report(settled, note)
 
 
 def cmd_approve(a):
@@ -2011,11 +1949,7 @@ def cmd_approve(a):
         die("fix the spec before approving")
     f.files.approve(f.branch)
     HERDR.sidebar(f.wt, state_text("approved", "", cfg.gates))
-    text = (
-        f"Spec approved. Continue: run `harness.py drive {a.slug} --tab` (or `run implementer {a.slug}`) now; "
-        "nothing runs on its own."
-    )
-    return HERDR.resume(root, f.wt, a.slug, text)
+    return HERDR.resume(root, f.wt, a.slug)
 
 
 def cmd_drive(a):
@@ -2064,8 +1998,7 @@ def land(root: Path, wt: Path, slug: str, base: str):
     if not ok:
         die(
             f"merging '{base}' into '{slug}' conflicts. Run:\n"
-            f'  harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"\n'
-            f"  (or: harness.py drive {slug} --tab)\nthen run merge again"
+            f'  harness.py drive {slug} "{SYNC_MSG.format(base=base)}" --tab\nthen run merge again'
         )
     errs = Checker.run(wt, [slug], True)
     if errs:
@@ -2117,9 +2050,6 @@ def main(argv=None) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("config", help="the setup in a few lines: roles, models, gates, commands (read-only)").set_defaults(
-        fn=cmd_config
-    )
     sub.add_parser("status", help="board across every worktree").set_defaults(fn=cmd_status)
 
     s = sub.add_parser("start", help="new worktree + branch + feature folder (orchestrator or human, base branch)")
@@ -2129,20 +2059,6 @@ def main(argv=None) -> int:
         "--trust", action="store_true", help="pass --trust-repository to herdr (only after verifying the repo)"
     )
     s.set_defaults(fn=cmd_start)
-
-    for name, fn, help_ in (
-        ("run", cmd_run, "run a role agent in the feature's worktree (orchestrator, from anywhere)"),
-        ("wait", cmd_wait, "keep waiting for a running role agent (orchestrator)"),
-    ):
-        s = sub.add_parser(name, help=help_)
-        s.add_argument("role", choices=list(ROLES))
-        s.add_argument("slug")
-        if name == "run":
-            s.add_argument("msg", nargs="?", default="", help="extra one-line message for the role agent")
-        s.add_argument(
-            "--timeout", type=int, default=DEFAULT_TIMEOUT_MS, help=f"ms to wait (default {DEFAULT_TIMEOUT_MS})"
-        )
-        s.set_defaults(fn=fn)
 
     s = sub.add_parser("drive", help="run the feature's whole loop until it needs a human (orchestrator)")
     s.add_argument("slug")
@@ -2161,7 +2077,7 @@ def main(argv=None) -> int:
     s.add_argument("slug")
     s.set_defaults(fn=cmd_approve)
 
-    s = sub.add_parser("doctor", help="tools, config, a green test_cmd, leftovers (anyone)")
+    s = sub.add_parser("doctor", help="the setup, then tools, config, a green test_cmd, leftovers (anyone)")
     s.add_argument("--no-tests", action="store_true", help="skip running test_cmd on the main checkout")
     s.add_argument(
         "--models", action="store_true", help="also send each Claude/Codex role one tiny prompt with its model"

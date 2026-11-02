@@ -39,9 +39,10 @@ the base branch. The launcher blocks a feature itself after `max_review_rounds` 
 | `review.md` | reviewer, one per round | frontmatter with one key, `verdict: APPROVED` or `verdict: CHANGES_REQUESTED`; `## Findings` (one actionable bullet per finding with the R id and `file:line`; "none" if approved); `## Checked` (the §5 checkpoints, `[x]`/`[ ]`). |
 
 `## Design` lists the files to touch, interfaces and signatures, data flow, decisions, one discarded
-alternative and why, and what is out of scope. `## Verification` maps each R to the test that covers
-it. The launcher removes `review.md` before each review round, so a verdict on disk always belongs to
-the current code.
+alternative and why, and what is out of scope. `## Verification` has one row per R naming its test
+file(s) in backticks (``| R1 | `tests/test_login.py::test_x` |``; anything after `::` is ignored). The
+launcher removes `review.md` before each review round, so a verdict on disk always belongs to the current
+code.
 
 ## 3. Requirements (EARS)
 
@@ -60,8 +61,8 @@ the current code.
 ## 4. Traceability
 
 Every active R has a test carrying the token `<slug>:R<n>` (for example `login:R3`) in its name, its
-docstring, or a comment on the line above; `check` verifies this with `git grep`, so the token is the
-contract. It is matched whole: `login:R10`, `user-login:R1` or `login:R1x` do not cover `login:R1`. Tests exercise real behaviour: none that only assert "does not raise", no mocking of the
+docstring, or a comment on the line above, in a file its `## Verification` row names; `check` verifies
+this with `git grep`, so the token is the contract. It is matched whole: `login:R10`, `user-login:R1` or `login:R1x` do not cover `login:R1`. Tests exercise real behaviour: none that only assert "does not raise", no mocking of the
 filesystem when a temporary directory works.
 
 ## 5. Reviewer checkpoints
@@ -93,7 +94,7 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 | 1 | `status` in `spec.md` is one of the lifecycle table | always |
 | 2 | at least one active R, ids unique, each with exactly one `SHALL` in an EARS pattern (§3) and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
 | 3 | every task cites an existing R and keeps no template placeholder (`<task>`); every active R is cited by a task | `spec_ready` |
-| 4 | every active R has its `<slug>:R<n>` token outside `harness/` (`git grep --untracked`) | `review` |
+| 4 | every active R has a `## Verification` row naming a test file; at `review`, one of those files carries its `<slug>:R<n>` token (`git grep --untracked`) | `spec_ready` |
 | 5 | every task ticked and `log.md` exists | `review` |
 | 6 | `test_cmd` exits 0 | `review`, or `--tests` |
 | 7 | nothing under `harness/` changed outside the feature folder (branch vs base, plus uncommitted and untracked files) | always, on a feature branch |
@@ -101,25 +102,26 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 | 9 | since the reviewer started (`refs/harness/<slug>/review-start`), only `review.md` and the status line of `spec.md` changed | while a verdict is on disk |
 | 10 | an `APPROVED` verdict exists only if the launcher started a reviewer round; one the implementer wrote is discarded | `review` |
 | 11 | `## Requirements` equals the one in the last `<slug>: spec approved` commit | `approved`, `in_progress`, `review` |
+| 12 | an `APPROVED` `review.md` ticks all eight §5 checkpoints `[x]` and its `## Findings` is `none` | while a verdict is on disk |
 
 `blocked` triggers rules 1 and 7 only; `merge` also requires `verdict: APPROVED`. When a role stops, the
-launcher runs rules 1–5 and 7–11 and requires a clean worktree; a role that leaves any of them red has
-not finished (NEEDS_ATTENTION, or sent back by the driver, three times at most). Commands and checks
+launcher runs rules 1–5 and 7–12 and requires a clean worktree; a role that leaves any of them red has
+not finished (the driver sends it back, three times at most, then stops for the human). A reviewer that
+leaves `APPROVED` with a red check loses the verdict and redoes the round. Commands and checks
 come from the main checkout's `config.json`, so a branch cannot change what it is tested with.
 
 ## 8. Launcher semantics not in `--help`
 
-- `run`/`wait` exit 0 DONE, 3 STILL_WORKING (call `wait`), 2 NEEDS_ATTENTION, 1 error. "Done" is
-  decided from the files on disk and a green check, never from the agent's screen alone.
+- A role run is done when the files on disk say so and the check is green, never from the agent's
+  screen alone.
 - `drive <slug> "msg"`: the message goes to the first role run. At a gate, to the role that produced
   what is judged (spec → spec_author, merge → implementer); when blocked, to the implementer if the spec
   was ever approved, else the spec_author. `--tab` runs the driver in the feature's workspace and
   returns; when it stops, it prompts the pane it was started from with `harness: <slug> ...`. At the
   merge gate a worktree with uncommitted changes stops the driver ("needs you") instead of merging; after
   an `auto` merge, `merge` itself prompts that pane with the outcome (merged at `<sha>`, or why it failed).
-- While a driver runs a feature, `run` and `merge` refuse it; while a role agent is still working,
-  `run` refuses to prompt it and the driver waits, up to `max_role_minutes` per role run; past that it
-  stops for the human and leaves the agent running.
+- While a driver runs a feature, `merge` refuses it. The driver waits for a role agent up to
+  `max_role_minutes` per role run; past that it stops for the human and leaves the agent running.
 
 ## 9. Trust model
 

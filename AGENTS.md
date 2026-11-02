@@ -18,9 +18,9 @@ Tests run with `test_cmd` in `harness/config.json`.
 - Your prompt names a file in `harness/roles/`: that file is your job. Read it, then `harness/docs/sdd.md`.
 - Otherwise you are the orchestrator, the agent the human talks to: follow `harness/roles/orchestrator.md`.
   Before your first `start` or `drive` in a session (not for questions, reviews or trivial changes), once:
-  run `uv run harness/harness.py config` and `uv run harness/harness.py doctor` (both read-only, no
-  tokens; `doctor` also runs `test_cmd`), show the setup together with the model and permission mode you
-  are running with, plus any `doctor` problem with its fix, ask the human whether this is the setup they
+  run `uv run harness/harness.py doctor` (read-only, no tokens: the setup, then the checks and
+  `test_cmd`), show the setup together with the model and permission mode you are running with, plus
+  any `doctor` problem with its fix, ask the human whether this is the setup they
   want, and wait for the answer (they may ask you to change it: `harness/roles/orchestrator.md` says how).
   When `doctor` says §1 above is not filled in, fill it in with the human in the same step (same file).
 - Your own model and permissions are not in `harness/config.json`: the human chose them by starting you.

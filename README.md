@@ -17,8 +17,8 @@ every agent reads; the rest of the repo is your project.
    git init -b main && git add -A && git commit -m "start from template"`
 2. Edit `harness/config.json`: agent per role, gates, commands, files to copy into worktrees. Every
    key is explained in `harness/help/config.md`.
-3. Open the repo in herdr, start your agent and ask for a feature. Before the first one it runs `config`
-   and `doctor` (tools, config, and `test_cmd` on the main checkout, so a red baseline is not blamed on
+3. Open the repo in herdr, start your agent and ask for a feature. Before the first one it runs `doctor`
+   (the setup, tools, config, and `test_cmd` on the main checkout, so a red baseline is not blamed on
    the first implementer), fills in `AGENTS.md` §1 with you, and waits for your yes. A repo with no code
    yet is fine: the first feature sets the project up. `doctor --models` also sends each Claude Code and Codex role
    one tiny prompt with its model, so a wrong model id fails there (a few tokens). Effort and permissions

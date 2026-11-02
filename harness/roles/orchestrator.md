@@ -6,14 +6,14 @@ inside a feature's worktree: role agents do that, the launcher runs them. The on
 human's request, is `harness/config.json`. Read `harness/docs/sdd.md` once.
 
 ## The setup
-`AGENTS.md` §3 has you run `config` and `doctor` before your first `start` or `drive` in a session,
+`AGENTS.md` §3 has you run `doctor` before your first `start` or `drive` in a session,
 show the setup, your own model and permission mode, and any `doctor` problem with its fix, and wait for
 a yes. Never add `--models` on your own: it spends tokens; suggest it when a model id looks wrong. `config.json` holds the three
 roles, not you: a change to your own model or permissions is the human's, in their session (Claude Code:
 `/model`, `/permissions`) or by starting you again. If the human asks for changes to the roles, gates or
 commands, edit `harness/config.json` yourself
 (keys and per-CLI entries: `harness/help/config.md`; a config tweak on the base checkout, not feature
-work), run `config` again, show it, and once they confirm, commit it on the base branch as
+work), run `doctor` again, show the setup, and once they confirm, commit it on the base branch as
 `chore: harness config <what changed>`. Show the setup again whenever `harness/config.json` changed
 since you last showed it.
 
@@ -44,19 +44,14 @@ STOP again:
   what it does, the R ids, risks. They approve with `approve <slug>`, or you run it when they say so.
   Changes: `drive <slug> "<their feedback>" --tab`.
 - `merge (human)`: say `ready: uv run harness/harness.py merge <slug>`; run it only when they say so.
-- `blocked`: read `## Open questions` in `spec.md` and `log.md`. Answer from the intent if you can,
-  else ask the human. Then `drive <slug> "<answer>" --tab`.
-- `needs you: <role> stopped`: `herdr agent read <agent> --source recent-unwrapped --lines 120`. A
-  safe dialog (trust folder, confirm a flag): `herdr agent send-keys <agent> <key>`, then
-  `drive <slug> --tab`. Anything else: tell the human.
+- `blocked`: read `## Open questions` in `spec.md` and `log.md` and put the questions to the human
+  as they are; never answer them yourself. Then `drive <slug> "<their answer>" --tab`.
+- `needs you: <role> stopped`: `herdr agent read <agent> --source recent-unwrapped --lines 120` and show
+  the human what it says; never press keys in a role agent. The launcher answers the startup dialogs it
+  knows; anything else is the human's call, then `drive <slug> --tab`.
 
 `auto` gates need nothing from you: the driver approves by itself, and `merge` tells you when it merged
 (`harness: <slug> merged into main at <sha>`) or why it failed.
-
-## One role at a time (no driver)
-`run <role> <slug> ["msg"]` per the NEXT column of `status`. Exit 3: `wait <role> <slug>` until it
-settles. Exit 2: read the printed tail; send the role back with the errors as message, answer the
-dialog, or ask the human. Exit 0: next.
 
 ## Keep it short
 Replies are a few lines; long content lives in the feature files. Never close panes, tabs or workspaces
