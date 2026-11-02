@@ -428,7 +428,7 @@ class PureFunctions(unittest.TestCase):
             "{repo} is the main checkout; other braces stay as written",
         )
         self.assertEqual(
-            h.role_prompt("reviewer", "s", " a\n b "),
+            h.RoleRun.prompt_for("reviewer", "s", " a\n b "),
             "Read harness/roles/reviewer.md and follow it for harness/features/s/. a b",
         )
 
@@ -872,7 +872,9 @@ class CheckRules(Case):
         self.r.spec("in_progress")
         self.r.commit("feat: review", cwd=self.r.wt)
         self.assertIsNone(
-            h.preflight(self.r.cfg(), self.r.wt, "implementer", "feat", "in_progress", "CHANGES_REQUESTED")
+            h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "implementer", "feat").blocker(
+                "in_progress", "CHANGES_REQUESTED"
+            )
         )
         self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
         (self.r.wt / "src" / "m.py").write_text("print(3)\n")
@@ -899,17 +901,26 @@ class CheckRules(Case):
 class RoleRuns(Case):
     def test_evaluate_outcomes(self):
         cfg = self.r.cfg()
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", False, "", cfg)[0], "STILL_WORKING")
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "agent_blocked", cfg)[0], "NEEDS_ATTENTION")
+        self.assertEqual(
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(False, "").result, "STILL_WORKING"
+        )
+        self.assertEqual(
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "agent_blocked").result,
+            "NEEDS_ATTENTION",
+        )
         self.stub_herdr("state", lambda name: "blocked")
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)[0], "NEEDS_ATTENTION")
+        self.assertEqual(
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "").result, "NEEDS_ATTENTION"
+        )
         self.stub_herdr("state", lambda name: "idle")
-        result, note, errs, _ = h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)
+        out = h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "")
+        result, note, errs = out.result, out.note, out.errors
         self.assertEqual((result, errs), ("NEEDS_ATTENTION", []))
         self.assertIn("is not what spec_author must leave", note)
         self.r.spec("spec_ready")
         self.r.tasks()
-        result, note, errs, _ = h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)
+        out = h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "")
+        result, note, errs = out.result, out.note, out.errors
         self.assertEqual((result, note), ("NEEDS_ATTENTION", "check fails"))
         self.assertEqual(len(errs), 1)
         self.assertIn(
@@ -917,14 +928,15 @@ class RoleRuns(Case):
             errs[0][:120],
         )
         self.r.commit("feat: spec", cwd=self.r.wt)
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)[0], "DONE")
+        self.assertEqual(h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "").result, "DONE")
 
     def test_evaluate_discards_implementer_verdict(self):
         self.r.spec("review")
         self.r.implemented()
         self.r.review("APPROVED")
         self.r.commit("feat: T1", cwd=self.r.wt)
-        result, note, errs, _ = h.evaluate(self.r.wt, "implementer", "feat", True, "", self.r.cfg())
+        out = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "implementer", "feat").outcome(True, "")
+        result, note, errs = out.result, out.note, out.errors
         self.assertEqual((result, note, errs), ("DONE", "discarded a verdict the implementer wrote", []))
         self.assertFalse((self.r.fdir / "review.md").exists())
         self.assertEqual(self.r.git("log", "--format=%s", "-1", cwd=self.r.wt), "feat: clear previous review")
@@ -938,7 +950,8 @@ class RoleRuns(Case):
         self.r.review("CHANGES_REQUESTED")
         self.r.spec("in_progress")
         self.r.commit("feat: review", cwd=self.r.wt)
-        result, note, _, _ = h.evaluate(self.r.wt, "reviewer", "feat", True, "", self.r.cfg())
+        out = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").outcome(True, "")
+        result, note = out.result, out.note
         self.assertEqual((result, note), ("NEEDS_ATTENTION", "blocked after 1 review rounds"))
         self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state(), ("blocked", "CHANGES_REQUESTED"))
         self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
@@ -948,13 +961,18 @@ class RoleRuns(Case):
         cfg = self.r.cfg()
         self.assertIn(
             "cannot run reviewer while status is 'pending'",
-            h.preflight(cfg, self.r.wt, "reviewer", "feat", "pending", ""),
+            h.RoleRun(cfg, self.r.root, self.r.wt, "reviewer", "feat").blocker("pending", ""),
         )
         (self.r.wt / "x.txt").write_text("")
-        self.assertIn("uncommitted changes", h.preflight(cfg, self.r.wt, "spec_author", "feat", "pending", ""))
+        self.assertIn(
+            "uncommitted changes", h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").blocker("pending", "")
+        )
         (self.r.wt / "x.txt").unlink()
         self.stub_herdr("state", lambda name: "working")
-        self.assertIn("spec-feat is still working", h.preflight(cfg, self.r.wt, "spec_author", "feat", "pending", ""))
+        self.assertIn(
+            "spec-feat is still working",
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").blocker("pending", ""),
+        )
 
     def review_ready(self):
         self.r.spec("review")
@@ -967,7 +985,9 @@ class RoleRuns(Case):
         self.r.commit("feat: old review", cwd=self.r.wt)
         (self.r.root / "new.txt").write_text("x")
         self.r.commit("main: new")
-        self.assertIsNone(h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", "CHANGES_REQUESTED"))
+        self.assertIsNone(
+            h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", "CHANGES_REQUESTED")
+        )
         self.assertTrue((self.r.wt / "new.txt").exists(), "the base branch was merged in")
         self.assertFalse((self.r.fdir / "review.md").exists(), "the old verdict is gone")
         self.assertEqual(
@@ -979,11 +999,12 @@ class RoleRuns(Case):
         self.review_ready()
         self.r.write_cfg(test_cmd="false")
         self.assertIsNone(
-            h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", ""), "nothing merged in: no test run"
+            h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", ""),
+            "nothing merged in: no test run",
         )
         (self.r.root / "new.txt").write_text("x")
         self.r.commit("main: new")
-        err = h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", "")
+        err = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", "")
         self.assertIn("check --tests fails on 'feat' after merging 'main'", err)
         self.assertIn("tests failed (exit 1: false)", err)
 
@@ -993,7 +1014,7 @@ class RoleRuns(Case):
         self.r.commit("main: 2")
         (self.r.wt / "src" / "m.py").write_text("def f():\n    return 3\n")
         self.r.commit("feat: 3", cwd=self.r.wt)
-        err = h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", "")
+        err = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", "")
         self.assertIn("merging 'main' into 'feat' conflicts", err)
         self.assertEqual(self.r.git("status", "--porcelain", cwd=self.r.wt), "")
 
@@ -1246,7 +1267,7 @@ class Commands(Case):
 
     def test_approve_requires_spec_ready_and_green_check(self):
         self.chdir(self.r.root)
-        self.stub("resume", lambda *a: 0)
+        self.stub_herdr("resume", lambda *a: 0)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             h.cmd_approve(Namespace(slug="feat"))
         self.r.spec("spec_ready", reqs="- R1: returns 1.")

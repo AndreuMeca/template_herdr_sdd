@@ -1189,6 +1189,30 @@ class Herdr:
             f"the driver did not start in pane {pane}; look at it: herdr pane read {pane} --lines 40",
         )
 
+    def resume(self, root: Path, wt: Path, slug: str, text: str) -> int:
+        """After a human gate: wake the detached orchestrator, else relaunch the driver in its tab, else say what to
+        run."""
+        if not self.available():
+            print(f"next (inside herdr): harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
+            return 0
+        try:
+            self.prompt(slug, text)
+            print(f"detached orchestrator '{slug}' notified")
+            return 0
+        except HerdrError as e:
+            if e.code != "agent_not_found":
+                print(f"warning: could not notify detached orchestrator '{slug}' ({e.code}: {e.message})")
+        try:
+            ws_id = self.workspace_of(wt)
+            if ws_id and self.driver_tab_pane(ws_id) and not DriverLock(wt).running():
+                pane = self.launch_driver(root, wt, slug, "", os.environ.get("HERDR_PANE_ID", ""))
+                print(f"driver resumed in pane {pane}")
+                return 0
+        except HerdrError as e:
+            print(f"warning: could not resume the driver ({e.code}: {e.message})")
+        print(f"next: harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
+        return 0
+
 
 HERDR = Herdr()
 
@@ -1379,132 +1403,133 @@ class Checker:
 
 
 # ----------------------------------------------------------------------------- running a role
-def preflight(cfg: Config, wt: Path, role: str, slug: str, st: str, vd: str, tests_always: bool = False) -> str | None:
-    """What stops `role` from starting now, or None. Prepares the branch: before a review the base branch is merged in
-    and the result checked; the review ref marks where the reviewer starts; a new implementer round drops it."""
-    base = cfg.base_branch
-    if st not in RUN_GATE[role]:
-        allowed = ", ".join(sorted(RUN_GATE[role]))
-        nxt = next_action(st, vd, cfg.gates)
-        return f"cannot run {role} while status is '{st or '(none)'}' (allowed: {allowed}); next: {nxt}"
-    if Git(wt).dirty():
-        return f"worktree {wt} has uncommitted changes; a role agent must not start on top of them"
-    name = agent_name(role, slug)
-    if HERDR.state(name) == "working":
-        return f"{name} is still working; wait for it: harness.py wait {role} {slug}"
-    ref = REVIEW_REF.format(slug=slug)
-    if role == "reviewer":
-        ok, moved = Git(wt).merge_in(base)
-        if not ok:
-            fix = f'harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"'
-            return f"merging '{base}' into '{slug}' conflicts; run: {fix}"
-        if moved or tests_always:
-            errs = Checker.run(wt, [slug], True)
-            if errs:
-                why = f" after merging '{base}'" if moved else ""
-                return (
-                    f"check --tests fails on '{slug}'{why}:\n"
-                    + "\n".join(errs)
-                    + f'\nrun: harness.py run implementer {slug} "check --tests fails; fix it, commit"'
-                )
-    if role == "reviewer" or (role == "implementer" and vd == "APPROVED"):
-        FeatureFiles(wt, slug).drop_review()
-    if role == "reviewer":
-        Git(wt).set_ref(ref)
-    elif role == "implementer":
-        Git(wt).drop_ref(ref)
-    return None
+@dataclass(frozen=True)
+class Outcome:
+    """How a role run ended, judged from the files on disk and a green check, never from the agent's screen alone."""
+
+    result: str  # DONE | STILL_WORKING | NEEDS_ATTENTION
+    note: str
+    errors: list
+    agent_state: str
 
 
-def role_prompt(role: str, slug: str, msg: str) -> str:
-    text = f"Read harness/roles/{role}.md and follow it for harness/features/{slug}/."
-    return text + (" " + " ".join(msg.split()) if msg else "")
+class RoleRun:
+    """One role agent's run on one feature in its worktree: what stops it from starting (and the branch preparation
+    before it does), the prompt it gets, and whether what it left on disk means it is done. Used by the driver and by
+    `run` / `wait`."""
 
+    def __init__(self, cfg: Config, root: Path, wt: Path, role: str, slug: str):
+        self.cfg, self.root, self.wt, self.role, self.slug = cfg, root, Path(wt), role, slug
+        self.name, self.agent = agent_name(role, slug), cfg.agent(role)
+        self.files, self.git = FeatureFiles(wt, slug), Git(wt)
+        self.ref = REVIEW_REF.format(slug=slug)
 
-def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Config) -> tuple[str, str, list[str], str]:
-    """(result, note, check errors, agent state) of a role run. DONE needs the on-disk evidence AND a green structural
-    check; a reviewer whose CHANGES_REQUESTED is the max_review_rounds-th blocks the feature for the human."""
-    name = agent_name(role, slug)
-    st, vd = FeatureFiles(wt, slug).state()
-    state = HERDR.state(name)
-    errs: list[str] = []
-    if not settled:
-        return "STILL_WORKING", note, errs, state
-    if state == "blocked" or note:
-        return "NEEDS_ATTENTION", note, errs, state
-    if not DONE_WHEN[role](st, vd):
-        return "NEEDS_ATTENTION", f"status {st or '?'} / verdict {vd or '-'} is not what {role} must leave", errs, state
-    if role == "implementer" and vd == "APPROVED" and not Git(wt).ref_exists(REVIEW_REF.format(slug=slug)):
-        FeatureFiles(wt, slug).drop_review()  # a verdict only the reviewer may write; the reviewer runs next
-        note, vd = "discarded a verdict the implementer wrote", ""
-    left = [p for _, p in Git(wt).porcelain()]
-    if left:  # docs/sdd.md §6: a role that stops with uncommitted changes has not finished
-        more = " ..." if len(left) > 8 else ""
-        errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them")
-    errs += Checker(wt, slug, cfg.base_branch).errors()
-    if errs:
-        return "NEEDS_ATTENTION", "check fails", errs, state
-    cap = cfg.max_review_rounds
-    if (
-        role == "reviewer"
-        and vd == "CHANGES_REQUESTED"
-        and cap
-        and FeatureFiles(wt, slug).review_rounds(cfg.base_branch) >= cap
-    ):
-        FeatureFiles(wt, slug).block(
-            f"{cap} review rounds ended in CHANGES_REQUESTED (max_review_rounds); the last findings are in review.md",
-        )
-        Git(wt).drop_ref(REVIEW_REF.format(slug=slug))
-        return "NEEDS_ATTENTION", f"blocked after {cap} review rounds", errs, state
-    return "DONE", note, errs, state
+    @staticmethod
+    def prompt_for(role: str, slug: str, msg: str) -> str:
+        text = f"Read harness/roles/{role}.md and follow it for harness/features/{slug}/."
+        return text + (" " + " ".join(msg.split()) if msg else "")
 
+    def blocker(self, st: str, vd: str, tests_always: bool = False) -> str | None:
+        """What stops the role from starting now, or None. Prepares the branch: before a review the base branch is
+        merged in and the result checked; the review ref marks where the reviewer starts; a new implementer round
+        drops it."""
+        role, slug, base = self.role, self.slug, self.cfg.base_branch
+        if st not in RUN_GATE[role]:
+            allowed = ", ".join(sorted(RUN_GATE[role]))
+            nxt = next_action(st, vd, self.cfg.gates)
+            return f"cannot run {role} while status is '{st or '(none)'}' (allowed: {allowed}); next: {nxt}"
+        if self.git.dirty():
+            return f"worktree {self.wt} has uncommitted changes; a role agent must not start on top of them"
+        if HERDR.state(self.name) == "working":
+            return f"{self.name} is still working; wait for it: harness.py wait {role} {slug}"
+        if role == "reviewer":
+            ok, moved = self.git.merge_in(base)
+            if not ok:
+                fix = f'harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"'
+                return f"merging '{base}' into '{slug}' conflicts; run: {fix}"
+            if moved or tests_always:
+                errs = Checker.run(self.wt, [slug], True)
+                if errs:
+                    why = f" after merging '{base}'" if moved else ""
+                    return (
+                        f"check --tests fails on '{slug}'{why}:\n"
+                        + "\n".join(errs)
+                        + f'\nrun: harness.py run implementer {slug} "check --tests fails; fix it, commit"'
+                    )
+        if role == "reviewer" or (role == "implementer" and vd == "APPROVED"):
+            self.files.drop_review()
+        if role == "reviewer":
+            self.git.set_ref(self.ref)
+        elif role == "implementer":
+            self.git.drop_ref(self.ref)
+        return None
 
-def report(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Config) -> int:
-    name = agent_name(role, slug)
-    result, note, errs, state = evaluate(wt, role, slug, settled, note, cfg)
-    st, vd = FeatureFiles(wt, slug).state()
-    print(f"{name}: state={state} status={st or '?'} verdict={vd or '-'} -> {result}" + (f" [{note}]" if note else ""))
-    if result == "STILL_WORKING":
-        print(f"next: harness.py wait {role} {slug}")
-        return EXIT_WORKING
-    if errs:
-        print("\n".join(errs))
-    print("--- last output ---")
-    print(HERDR.tail(name).rstrip())
-    print("---")
-    HERDR.sidebar(wt, state_text(st, vd, cfg.gates))
-    if result == "DONE":
-        print(f"next: {next_action(st, vd, cfg.gates)}")
-        return EXIT_DONE
-    if errs:
-        print(f'send it back: harness.py run {role} {slug} "check fails: <the lines above>; fix, commit"')
-    print(f"inspect: herdr agent read {name} --source recent-unwrapped --lines 120")
-    print(f"answer a dialog: herdr agent send-keys {name} <key>   (or ask the human)")
-    return EXIT_ATTENTION
+    def send(self, msg: str, timeout_ms: int) -> tuple[bool, str]:
+        """Prompt the role agent with its job (starting it if needed); (settled, note)."""
+        text = self.prompt_for(self.role, self.slug, msg)
+        return HERDR.prompt_or_start(self.root, self.wt, self.role, self.slug, text, timeout_ms, self.agent)
 
+    def outcome(self, settled: bool, note: str) -> Outcome:
+        """DONE needs the on-disk evidence AND a green structural check; a reviewer whose CHANGES_REQUESTED is the
+        max_review_rounds-th blocks the feature for the human."""
+        role, slug = self.role, self.slug
+        st, vd = self.files.state()
+        state = HERDR.state(self.name)
+        errs: list[str] = []
+        if not settled:
+            return Outcome("STILL_WORKING", note, errs, state)
+        if state == "blocked" or note:
+            return Outcome("NEEDS_ATTENTION", note, errs, state)
+        if not DONE_WHEN[role](st, vd):
+            why = f"status {st or '?'} / verdict {vd or '-'} is not what {role} must leave"
+            return Outcome("NEEDS_ATTENTION", why, errs, state)
+        if role == "implementer" and vd == "APPROVED" and not self.git.ref_exists(self.ref):
+            self.files.drop_review()  # a verdict only the reviewer may write; the reviewer runs next
+            note, vd = "discarded a verdict the implementer wrote", ""
+        left = [p for _, p in self.git.porcelain()]
+        if left:  # docs/sdd.md §6: a role that stops with uncommitted changes has not finished
+            more = " ..." if len(left) > 8 else ""
+            errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them")
+        errs += Checker(self.wt, slug, self.cfg.base_branch).errors()
+        if errs:
+            return Outcome("NEEDS_ATTENTION", "check fails", errs, state)
+        cap = self.cfg.max_review_rounds
+        if (
+            role == "reviewer"
+            and vd == "CHANGES_REQUESTED"
+            and cap
+            and self.files.review_rounds(self.cfg.base_branch) >= cap
+        ):
+            last = "the last findings are in review.md"
+            self.files.block(f"{cap} review rounds ended in CHANGES_REQUESTED (max_review_rounds); {last}")
+            self.git.drop_ref(self.ref)
+            return Outcome("NEEDS_ATTENTION", f"blocked after {cap} review rounds", errs, state)
+        return Outcome("DONE", note, errs, state)
 
-def resume(root: Path, wt: Path, slug: str, text: str) -> int:
-    """After a human gate: wake the detached orchestrator, else relaunch the driver in its tab, else say what to run."""
-    if not Herdr.available():
-        print(f"next (inside herdr): harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
-        return 0
-    try:
-        HERDR.prompt(slug, text)
-        print(f"detached orchestrator '{slug}' notified")
-        return 0
-    except HerdrError as e:
-        if e.code != "agent_not_found":
-            print(f"warning: could not notify detached orchestrator '{slug}' ({e.code}: {e.message})")
-    try:
-        ws_id = HERDR.workspace_of(wt)
-        if ws_id and HERDR.driver_tab_pane(ws_id) and not DriverLock(wt).running():
-            pane = HERDR.launch_driver(root, wt, slug, "", os.environ.get("HERDR_PANE_ID", ""))
-            print(f"driver resumed in pane {pane}")
-            return 0
-    except HerdrError as e:
-        print(f"warning: could not resume the driver ({e.code}: {e.message})")
-    print(f"next: harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
-    return 0
+    def report(self, settled: bool, note: str) -> int:
+        """`run` / `wait`: print the outcome, the agent's last output and what to do next; the exit code."""
+        role, slug, name = self.role, self.slug, self.name
+        out = self.outcome(settled, note)
+        st, vd = self.files.state()
+        tail = f" [{out.note}]" if out.note else ""
+        print(f"{name}: state={out.agent_state} status={st or '?'} verdict={vd or '-'} -> {out.result}{tail}")
+        if out.result == "STILL_WORKING":
+            print(f"next: harness.py wait {role} {slug}")
+            return EXIT_WORKING
+        if out.errors:
+            print("\n".join(out.errors))
+        print("--- last output ---")
+        print(HERDR.tail(name).rstrip())
+        print("---")
+        HERDR.sidebar(self.wt, state_text(st, vd, self.cfg.gates))
+        if out.result == "DONE":
+            print(f"next: {next_action(st, vd, self.cfg.gates)}")
+            return EXIT_DONE
+        if out.errors:
+            print(f'send it back: harness.py run {role} {slug} "check fails: <the lines above>; fix, commit"')
+        print(f"inspect: herdr agent read {name} --source recent-unwrapped --lines 120")
+        print(f"answer a dialog: herdr agent send-keys {name} <key>   (or ask the human)")
+        return EXIT_ATTENTION
 
 
 # ----------------------------------------------------------------------------- driver
@@ -1573,7 +1598,7 @@ class Driver:
             self.msg = text
             return
         st, vd = self.files.state()
-        err = preflight(self.cfg, self.wt, role, self.slug, st, vd)
+        err = RoleRun(self.cfg, self.root, self.wt, role, self.slug).blocker(st, vd)
         if err:
             self.stop(f"cannot run {role}: {err}", EXIT_ERROR)
         self.run_role(role, text, st, vd)
@@ -1661,20 +1686,17 @@ class Driver:
         return note
 
     def run_role(self, role: str, text: str, st: str, vd: str):
-        name = agent_name(role, self.slug)
+        run = RoleRun(self.cfg, self.root, self.wt, role, self.slug)
         self.log(f"run {role}" + (f": {' '.join(text.split())[:120]}" if text else ""))
         HERDR.sidebar(self.wt, state_text(st, vd, self.gates, running=role))
-        prompt = role_prompt(role, self.slug, text)
         started = time.time()
-        settled, note = HERDR.prompt_or_start(
-            self.root, self.wt, role, self.slug, prompt, DRIVE_WAIT_MS, self.cfg.agent(role)
-        )
-        note = self.wait_role(role, settled, note, started)
-        result, note, errs, state = evaluate(self.wt, role, self.slug, True, note, self.cfg)
-        self.log(f"{name}: state={state} -> {result}" + (f" [{note}]" if note else ""))
+        settled, note = run.send(text, DRIVE_WAIT_MS)
+        out = run.outcome(True, self.wait_role(role, settled, note, started))
+        note, errs = out.note, out.errors
+        self.log(f"{run.name}: state={out.agent_state} -> {out.result}" + (f" [{note}]" if note else ""))
         if errs:
             print("\n".join(errs))
-        if result == "DONE":
+        if out.result == "DONE":
             self.fails = 0
             return
         if self.files.state()[0] == "blocked":  # the launcher blocked it (review cap): the human decides
@@ -1688,7 +1710,7 @@ class Driver:
             self.stop(f"blocked, needs you: check keeps failing after {FIX_TRIES} fixes", EXIT_ATTENTION)
         self.stop(
             f"needs you: {role} stopped ({note or 'see its screen'}); "
-            f"inspect: herdr agent read {name} --source recent-unwrapped --lines 120",
+            f"inspect: herdr agent read {run.name} --source recent-unwrapped --lines 120",
             EXIT_ATTENTION,
         )
 
@@ -2051,25 +2073,23 @@ def cmd_run(a):
             f"a driver (pid {pid}) is running {a.slug} and starts the roles itself; "
             f"stop it first (kill {pid}) to run one by hand"
         )
-    err = preflight(cfg, f.wt, a.role, a.slug, f.status, f.verdict)
+    run = RoleRun(cfg, root, f.wt, a.role, a.slug)
+    err = run.blocker(f.status, f.verdict)
     if err:
         die(err)
     HERDR.sidebar(f.wt, state_text(f.status, f.verdict, cfg.gates, running=a.role))
-    settled, note = HERDR.prompt_or_start(
-        root, f.wt, a.role, a.slug, role_prompt(a.role, a.slug, a.msg), a.timeout, cfg.agent(a.role)
-    )
-    return report(f.wt, a.role, a.slug, settled, note, cfg)
+    settled, note = run.send(a.msg, a.timeout)
+    return run.report(settled, note)
 
 
 def cmd_wait(a):
     root = Git.here().path
     cfg = Config.load(root)
-    wt = Feature.live_one(root, a.slug).wt
-    name = agent_name(a.role, a.slug)
-    settled, note = HERDR.wait(name, a.timeout)
+    run = RoleRun(cfg, root, Feature.live_one(root, a.slug).wt, a.role, a.slug)
+    settled, note = HERDR.wait(run.name, a.timeout)
     if note == "agent_not_found":
-        die(f"no agent '{name}'; start it with: harness.py run {a.role} {a.slug}")
-    return report(wt, a.role, a.slug, settled, note, cfg)
+        die(f"no agent '{run.name}'; start it with: harness.py run {a.role} {a.slug}")
+    return run.report(settled, note)
 
 
 def cmd_approve(a):
@@ -2088,7 +2108,7 @@ def cmd_approve(a):
         f"Spec approved. Continue: run `harness.py drive {a.slug} --tab` (or `run implementer {a.slug}`) now; "
         "nothing runs on its own."
     )
-    return resume(root, f.wt, a.slug, text)
+    return HERDR.resume(root, f.wt, a.slug, text)
 
 
 def cmd_drive(a):
