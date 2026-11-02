@@ -6,14 +6,12 @@
 """SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/run/wait/drive/merge also need herdr.
 
   harness.py config                        the setup in a few lines: roles, models, gates, commands (anyone)
-                     [--apply]             ... and write the orchestrator's model/permissions for Claude Code (human)
   harness.py status                        board across every worktree, grouped by whose move it is (anyone)
   harness.py start <slug> ["intent"]       new worktree + branch + feature folder (orchestrator or human, base branch)
-                     [--detach]            ... plus a dedicated orchestrator agent in it
   harness.py drive <slug> ["msg"] --tab    run the whole loop in a `driver` tab until a human is needed (orchestrator)
   harness.py run <role> <slug> ["msg"]     run one role agent in the feature's worktree (orchestrator, from anywhere)
   harness.py wait <role> <slug>            keep waiting for a running role agent        (orchestrator)
-  harness.py approve <slug>                approve a spec; the driver or orchestrator continues (human)
+  harness.py approve <slug>                approve a spec; the driver continues            (human)
   harness.py merge <slug>                  merge an approved, reviewed feature          (human, base branch)
   harness.py check [slug] [--tests]        structural checks (+ tests)                  (everyone)
   harness.py doctor                        tools, config, leftovers                     (anyone)
@@ -41,7 +39,6 @@ STATUSES = ["pending", "spec_ready", "approved", "in_progress", "review", "done"
 RANK = {"pending": 0, "blocked": 0, "spec_ready": 1, "approved": 2, "in_progress": 3, "review": 4, "done": 5}
 VERDICTS = ("APPROVED", "CHANGES_REQUESTED")
 ROLES = {"spec_author": "spec", "implementer": "impl", "reviewer": "rev"}
-AGENT_ROLES = ("orchestrator", *ROLES)  # every entry of agents in config.json
 RUN_GATE = {
     "spec_author": {"pending", "spec_ready", "blocked"},
     "implementer": {"approved", "in_progress", "review", "blocked"},
@@ -73,17 +70,11 @@ SYNC_MSG = (
 )
 # config.json speaks one vocabulary for every CLI; CLIS translates it (harness/help/config.md has the same tables)
 EFFORT_LEVELS = ("low", "medium", "high", "extra", "max")
-PERMISSION_LEVELS = ("ask", "edits", "guarded", "full")
-ROLE_PERMISSIONS = ("guarded", "full")  # a role agent runs unattended: it must never stop to ask
+PERMISSION_LEVELS = ("guarded", "full")  # a role agent runs unattended: it must never stop to ask
 PERMISSION_WORDS = {
-    "ask": "asks before edits and commands",
-    "edits": "edits freely, asks before commands",
     "guarded": "never asks, the CLI blocks risky actions",
     "full": "never asks, no limits",
 }
-CLAUDE_MODES = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
-CLAUDE_ALLOW = "Bash(uv run harness/harness.py:*)"
-CLAUDE_DENY = "Bash(uv run harness/harness.py config --apply:*)"
 PROVIDER_EFFORTS = {"minimal": "low", "xhigh": "extra"}  # provider words people may type, and ours
 PERMISSION_FLAGS = ("--dangerously-", "--permission-mode", "--sandbox", "--ask-for-approval", "--yolo")
 
@@ -122,8 +113,6 @@ CLIS = {
         effort_flag=("--effort", "{}"),
         efforts={**SAME_EFFORTS, "extra": "xhigh", "max": "max"},
         permissions={
-            "ask": ["--permission-mode", "manual"],
-            "edits": ["--permission-mode", "acceptEdits"],
             "guarded": ["--permission-mode", "auto"],
             "full": ["--dangerously-skip-permissions"],
         },
@@ -135,7 +124,6 @@ CLIS = {
         effort_flag=("-c", "model_reasoning_effort={}"),
         efforts={**SAME_EFFORTS, "extra": "xhigh", "max": "xhigh"},  # codex has nothing above xhigh
         permissions={
-            "ask": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
             "guarded": ["--sandbox", "workspace-write", "--ask-for-approval", "never", "--add-dir", "{repo}/.git"],
             "full": ["--dangerously-bypass-approvals-and-sandbox"],
         },
@@ -322,11 +310,9 @@ class AgentConfig:
                 effort in PROVIDER_EFFORTS
             ) else ""  # fmt: skip
             die(f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}{hint}")
-        if not isinstance(perm, str) or (perm and perm not in PERMISSION_LEVELS):
-            die(f"{where}.permissions must be one of {', '.join(PERMISSION_LEVELS)}")
-        if role in ROLES and perm not in ROLE_PERMISSIONS:
-            why = f"'{perm}' would stop it at its first prompt" if perm else "it is required"
-            die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(ROLE_PERMISSIONS)}")
+        if not isinstance(perm, str) or perm not in PERMISSION_LEVELS:
+            why = f"'{perm}' is not one of them" if perm else "it is required"
+            die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(PERMISSION_LEVELS)}")
         if cli and perm and perm not in cli.permissions:
             die(f"{where}.permissions '{perm}' is not available for {name} (it has: {', '.join(cli.permissions)})")
         args = raw.get("args") or []
@@ -349,21 +335,6 @@ class AgentConfig:
         flags = [*cli.effort_args(self.effort), *cli.permission_args(self.permissions)] if cli else []
         flags = [x.replace("{repo}", str(repo)) for x in [*flags, *self.args]]
         return ["--", *model, *flags] if (model or flags) else []
-
-    def claude_settings(self) -> dict:
-        """What Claude Code should start with in this repo when this is the orchestrator: its model, and the
-        permission mode of its `permissions` level (CLAUDE_MODES; unset = ask = Claude Code's default), leave to run
-        the launcher without asking, and a deny on `config --apply` so it cannot raise its own permissions."""
-        out: dict = {
-            "permissions": {
-                "defaultMode": CLAUDE_MODES[self.permissions or "ask"],
-                "allow": [CLAUDE_ALLOW],
-                "deny": [CLAUDE_DENY],
-            }
-        }
-        if self.model:
-            out["model"] = self.model
-        return out
 
     def describe(self) -> list[str]:
         """How `config` shows its effort and permissions: our words, then what its CLI is given."""
@@ -419,7 +390,7 @@ class Config:
             if key not in raw:
                 die(f"{p}: missing '{key}'")
         agents = raw["agents"] if isinstance(raw["agents"], dict) else {}
-        agents = {role: AgentConfig.parse(role, agents.get(role), f"{p}: agents.{role}") for role in AGENT_ROLES}
+        agents = {role: AgentConfig.parse(role, agents.get(role), f"{p}: agents.{role}") for role in ROLES}
         gates = {gate: (raw.get("gates") or {}).get(gate, "human") for gate in ("approve", "merge")}
         for gate, who in gates.items():
             if who not in ("human", "auto"):
@@ -448,73 +419,6 @@ class Config:
 
     def agent(self, role: str) -> AgentConfig:
         return self.agents[role]
-
-
-class ClaudeSettings:
-    """.claude/settings.local.json (per machine, gitignored) against agents.orchestrator, so the Claude the human
-    opens in this repo starts with that model and permission mode. `report` only reads: raising the permissions of
-    the next session is the human's call, never an agent's. `config --apply` runs `apply`, and so does `doctor`
-    when the human runs it in a terminal; inside a Claude Code session (CLAUDECODE set) `doctor` only reports."""
-
-    NOT_CLAUDE = "orchestrator is not Claude Code: .claude/settings.local.json left alone"
-    APPLY_CMD = "uv run harness/harness.py config --apply"
-    DOCTOR_CMD = "uv run harness/harness.py doctor"
-
-    @staticmethod
-    def in_session() -> bool:
-        """Is this process running inside a Claude Code session (an agent's shell, not the human's terminal)?"""
-        return bool(os.environ.get("CLAUDECODE"))
-
-    def __init__(self, root: Path, orchestrator: AgentConfig):
-        self.path = root / ".claude" / "settings.local.json"
-        self.orchestrator = orchestrator
-
-    def compare(self) -> tuple[dict, dict, str] | None:
-        """(current, wanted, summary); other keys in the file are kept. None when the orchestrator is not Claude
-        Code."""
-        if self.orchestrator.harness != "claude":
-            return None
-        want = self.orchestrator.claude_settings()
-        try:
-            current = json.loads(self.path.read_text()) if self.path.exists() else {}
-        except json.JSONDecodeError:
-            current = {}
-        new = dict(current)
-        perms = dict(current.get("permissions") or {})
-        perms["defaultMode"] = want["permissions"]["defaultMode"]
-        for key in ("allow", "deny"):  # added to the human's own rules, never replacing them
-            have = perms.get(key) or []
-            perms[key] = have + [r for r in want["permissions"][key] if r not in have]
-        new["permissions"] = perms
-        if "model" in want:
-            new["model"] = want["model"]
-        mode = want["permissions"]["defaultMode"]
-        return current, new, f"model {want.get('model', '(Claude Code default)')}, permissions {mode}"
-
-    def report(self) -> str:
-        """One read-only line: is the file in step with agents.orchestrator?"""
-        s = self.compare()
-        if s is None:
-            return self.NOT_CLAUDE
-        current, new, what = s
-        if new == current:
-            return f"Claude Code in this repo: {what} (in step with .claude/settings.local.json)"
-        return (
-            f"Claude Code in this repo should run with {what}, which .claude/settings.local.json does not say yet; "
-            f"to apply, run yourself in a terminal: {self.DOCTOR_CMD} (or {self.APPLY_CMD}), then restart Claude Code"
-        )
-
-    def apply(self) -> str:
-        """`config --apply`: write the file. Returns one report line."""
-        s = self.compare()
-        if s is None:
-            return self.NOT_CLAUDE
-        current, new, what = s
-        if new == current:
-            return f"Claude Code in this repo: {what} (.claude/settings.local.json unchanged)"
-        self.path.parent.mkdir(exist_ok=True)
-        self.path.write_text(json.dumps(new, indent=2) + "\n")
-        return f"Claude Code in this repo: {what} (.claude/settings.local.json updated; restart Claude Code to apply)"
 
 
 class WorktreeSetup:
@@ -1127,7 +1031,7 @@ class Herdr:
         return self.state(name) in ("idle", "done")
 
     def start(self, name: str, agent: AgentConfig, pane_id: str, repo: Path, tries: int = 1) -> bool:
-        """Start a role or orchestrator agent in a pane; True when it is up (or already reported as not ready yet)."""
+        """Start a role agent in a pane; True when it is up (or already reported as not ready yet)."""
         for attempt in range(tries):  # a new pane's shell may need a moment to reach its prompt
             try:
                 args = ("--kind", agent.harness, "--pane", pane_id, "--timeout", 120_000, *agent.cli_args(repo))
@@ -1211,18 +1115,10 @@ class Herdr:
         )
 
     def resume(self, root: Path, wt: Path, slug: str, text: str) -> int:
-        """After a human gate: wake the detached orchestrator, else relaunch the driver in its tab, else say what to
-        run."""
+        """After a human gate: relaunch the driver in its tab, else say what to run."""
         if not self.available():
             print(f"next (inside herdr): harness.py drive {slug} --tab   (or: harness.py run implementer {slug})")
             return 0
-        try:
-            self.prompt(slug, text)
-            print(f"detached orchestrator '{slug}' notified")
-            return 0
-        except HerdrError as e:
-            if e.code != "agent_not_found":
-                print(f"warning: could not notify detached orchestrator '{slug}' ({e.code}: {e.message})")
         try:
             ws_id = self.workspace_of(wt)
             if ws_id and self.driver_tab_pane(ws_id) and not DriverLock(wt).running():
@@ -1801,7 +1697,7 @@ class Doctor:
         self.check(
             Git(self.root).ref_exists(f"refs/heads/{cfg.base_branch}"), f"base branch '{cfg.base_branch}' exists"
         )
-        for role in ("orchestrator", *ROLES):
+        for role in ROLES:
             kind = cfg.agent(role).harness
             self.check(
                 shutil.which(kind) is not None,
@@ -1816,13 +1712,6 @@ class Doctor:
                 self.notes.append(f"copy_files: {pat} is not in the main checkout, so new worktrees will not get it")
         for line in bad:
             self.check(False, f".worktreeinclude line rejected: {line}", "relative paths only, no '..'")
-        settings = ClaudeSettings(self.root, cfg.agent("orchestrator"))
-        if ClaudeSettings.in_session():  # an agent: it may not raise its own permissions
-            report = settings.report()
-            if ClaudeSettings.APPLY_CMD in report:
-                self.notes.append(report)
-        elif settings.compare() is not None:
-            self.check(True, settings.apply())
 
     def baseline(self, cfg: Config):
         """test_cmd on the main checkout: a red baseline would be blamed on the first feature's implementer."""
@@ -1841,7 +1730,7 @@ class Doctor:
     def models_check(self, cfg: Config):
         """`--models`: one tiny prompt per (CLI, model) pair, so a wrong model id fails here, not mid-feature."""
         seen: dict[tuple, bool] = {}
-        for role in (*ROLES, "orchestrator"):
+        for role in ROLES:
             agent = cfg.agent(role)
             kind, model, cli = agent.harness, agent.model, agent.cli
             if not (cli and cli.probe) or not model:
@@ -1940,17 +1829,15 @@ def cmd_config(a):
     print(f"  max_review_rounds  {cfg.max_review_rounds or 'no limit'}")
     print(f"  max_role_minutes   {cfg.max_role_minutes or 'no limit'}")
     print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
-    for role in (*ROLES, "orchestrator"):
+    for role in ROLES:
         agent = cfg.agent(role)
         kind, model = agent.harness, agent.model or "(default model)"
         missing = "   <- not in PATH" if not shutil.which(kind) else ""
-        note = "   (only used by start --detach)" if role == "orchestrator" else ""
-        print(f"  {role:<18} {kind:<7} {model}{missing}{note}")
+        print(f"  {role:<18} {kind:<7} {model}{missing}")
         for line in agent.describe():
             print(f"  {'':<18} {line}")
     print("  effort: " + " < ".join(EFFORT_LEVELS) + "   permissions: " + ", ".join(PERMISSION_LEVELS))
-    settings = ClaudeSettings(root, cfg.agent("orchestrator"))
-    print(settings.apply() if a.apply else settings.report())
+    print("  orchestrator       the agent you started (not in this file): its model and permissions are its own")
     print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
     return 0
 
@@ -2043,33 +1930,6 @@ def seed_feature(wt: Path, slug: str, intent: str):
     Git(wt).run("commit", "-q", "-m", f"{slug}: new feature")  # everything staged, as before
 
 
-def start_detached(root: Path, cfg: Config, slug: str, res: dict):
-    """A dedicated orchestrator agent in the worktree's root pane, prompted with its role."""
-    agent = cfg.agent("orchestrator")
-    pane_id = res["root_pane"]["pane_id"]
-    tab_id = Herdr.find_key(res.get("tab", {}), "tab_id")
-    if tab_id:
-        with contextlib.suppress(HerdrError):
-            HERDR.rename_tab(tab_id, "orchestrator")
-    text = f"Read harness/roles/orchestrator.md and follow it for harness/features/{slug}/."
-    started = HERDR.start(slug, agent, pane_id, root, tries=3)
-    if started and not HERDR.settle_startup(slug, agent):
-        print(
-            "warning: the orchestrator is blocked on a dialog; look at it: "
-            f"herdr agent read {slug} --source visible --lines 40"
-        )
-        started = False
-    if started:
-        try:
-            HERDR.prompt(slug, text)
-            print(f"orchestrator '{slug}' started and prompted")
-        except HerdrError as e:
-            print(f'warning: prompt -> {e.code}: {e.message}\nsend it yourself: herdr agent prompt {slug} "{text}"')
-    else:
-        print(f'start the orchestrator yourself in pane {pane_id}, then: herdr agent prompt {slug} "{text}"')
-    print(f"detached orchestrator agent: {slug}   peek: herdr agent read {slug} --source recent-unwrapped --lines 60")
-
-
 def cmd_start(a):
     root = Git.here().path
     cfg = Config.load(root)
@@ -2081,10 +1941,7 @@ def cmd_start(a):
     HERDR.sidebar(wt, state_text("pending", "", cfg.gates))
     ws_id = res["workspace"]["workspace_id"]
     print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")
-    if a.detach:
-        start_detached(root, cfg, a.slug, res)
-    else:
-        print(f"next: harness.py drive {a.slug} --tab   (or one role at a time: harness.py run spec_author {a.slug})")
+    print(f"next: harness.py drive {a.slug} --tab   (or one role at a time: harness.py run spec_author {a.slug})")
     return 0
 
 
@@ -2235,21 +2092,14 @@ def main(argv=None) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("config", help="the setup in a few lines: roles, models, gates, commands (read-only)")
-    s.add_argument(
-        "--apply",
-        action="store_true",
-        help="also write the orchestrator's model and permission mode to .claude/settings.local.json (human only)",
+    sub.add_parser("config", help="the setup in a few lines: roles, models, gates, commands (read-only)").set_defaults(
+        fn=cmd_config
     )
-    s.set_defaults(fn=cmd_config)
     sub.add_parser("status", help="board across every worktree").set_defaults(fn=cmd_status)
 
     s = sub.add_parser("start", help="new worktree + branch + feature folder (orchestrator or human, base branch)")
     s.add_argument("slug")
     s.add_argument("intent", nargs="?", default="")
-    s.add_argument(
-        "--detach", action="store_true", help="also start a dedicated orchestrator agent inside the worktree"
-    )
     s.add_argument(
         "--trust", action="store_true", help="pass --trust-repository to herdr (only after verifying the repo)"
     )
@@ -2282,7 +2132,7 @@ def main(argv=None) -> int:
     )
     s.set_defaults(fn=cmd_drive)
 
-    s = sub.add_parser("approve", help="approve a spec; the driver or detached orchestrator continues (human)")
+    s = sub.add_parser("approve", help="approve a spec; the driver continues (human)")
     s.add_argument("slug")
     s.set_defaults(fn=cmd_approve)
 

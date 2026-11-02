@@ -19,7 +19,7 @@ has no model and no cost.
 | `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
 | `max_role_minutes` | no | integer, default `180`, `0` = no limit | When one role run (prompt to settled) takes longer, the driver stops and prompts the orchestrator ("still working after N min"). The agent keeps running; you decide whether to wait (`drive <slug> --tab` again) or stop it. |
 | `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `auto`. |
-| `agents.<role>` | yes, all four | object, below | Which CLI and model run `spec_author`, `implementer`, `reviewer`, and `orchestrator`. The orchestrator entry starts the agent of `start --detach`, and when its harness is `claude` it also sets what the Claude you open in this repo starts with: `doctor` run in your terminal (or `config --apply`) writes its `model` and the Claude Code mode of its `permissions` (ask → default, edits → acceptEdits, guarded → auto, full → bypassPermissions) to `.claude/settings.local.json`, read at the next session start, with two rules added to any of yours: allow `uv run harness/harness.py`, deny `config --apply` (only you raise its permissions). Plain `config`, and `doctor` run by an agent inside Claude Code, only say whether that file matches. |
+| `agents.<role>` | yes, all three | object, below | Which agent harness and model run `spec_author`, `implementer` and `reviewer`. Not the orchestrator: that is whichever agent you start in the repo (it reads `AGENTS.md`), with the model and permissions you start it with. |
 
 ## `agents.<role>`
 
@@ -31,7 +31,7 @@ translates them for each CLI. `config` shows both.
 | `harness` | yes | the agent CLI, by its herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
 | `model` | no | the provider's model id, or `""` | Passed as `--model`; empty = the CLI's default. Kept as the provider names it, so you always see what you pay for; `doctor --models` checks it. |
 | `effort` | no | `low`, `medium`, `high`, `extra`, `max`, or `""` | How hard the model thinks, translated per CLI (table below). Empty = the CLI's default. |
-| `permissions` | yes for the three roles; no for the orchestrator | `ask`, `edits`, `guarded`, `full` | What the agent may do without asking (table below). Roles run unattended, so they must be `guarded` or `full`. A missing orchestrator value = the CLI's default. |
+| `permissions` | yes | `guarded`, `full` | What the agent may do without asking (table below). Roles run unattended, so there is no level that asks. |
 | `args` | no | list of strings | Any other flag, verbatim (`{repo}` becomes the main checkout's absolute path, so the file stays the same on every machine). Not a permission flag when `permissions` is set: `config` rejects that. |
 
 **effort**, by meaning; where a CLI has no such level it gets its nearest one:
@@ -48,12 +48,10 @@ translates them for each CLI. `config` shows both.
 
 | ours | the agent | claude | codex | pi |
 |---|---|---|---|---|
-| `ask` | asks before edits and commands | `--permission-mode manual` | `--sandbox workspace-write --ask-for-approval on-request` | — |
-| `edits` | edits files freely, asks before commands | `--permission-mode acceptEdits` | — | — |
 | `guarded` | never asks; the CLI blocks risky actions | `--permission-mode auto` (a classifier reviews each action) | `--sandbox workspace-write --ask-for-approval never --add-dir {repo}/.git` (writes only in its worktree, plus the git dir it needs to commit) | — |
 | `full` | never asks, no limits | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | (pi never asks) |
 
-A level a CLI does not have (—) is a config error that names the levels it does have. `guarded` means the
+A level a CLI does not have (—) is a config error that names the one it does have. `guarded` means the
 same promise through different mechanisms; `full` is only for a machine you would not mind an agent
 breaking. What either means for the harness: `harness/docs/sdd.md` §9. For a CLI not in these tables
 (`gemini`, `opencode`, ...), `effort` and `permissions` are not translated: `config` says so, and its own
