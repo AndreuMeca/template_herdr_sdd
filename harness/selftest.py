@@ -123,6 +123,23 @@ class Repo:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+def fake_driver(case) -> int:
+    """pid of a live process whose command line reads like a driver's; killed when the test ends."""
+    code = "import time; time.sleep(60)"
+    p = subprocess.Popen([sys.executable, "-c", code, "harness.py", "drive", "feat"])
+    case.addCleanup(p.wait)
+    case.addCleanup(p.kill)
+    return p.pid
+
+
+def ps_works() -> bool:
+    """`ps` can be run here (a sandbox may block it; the launcher then trusts a live pid)."""
+    try:
+        return subprocess.run(["ps", "-p", str(os.getpid())], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
 def no_herdr(*args):
     raise AssertionError(f"herdr must not be called in tests: {args}")
 
@@ -555,10 +572,36 @@ class GitHelpers(Case):
     def test_driver_lock(self):
         self.assertEqual(h.driver_running(self.r.wt), 0)
         lock = h.driver_lock(self.r.wt)
-        lock.write_text(str(os.getpid()))
-        self.assertEqual(h.driver_running(self.r.wt), os.getpid())
+        pid = fake_driver(self)
+        lock.write_text(str(pid))
+        self.assertEqual(h.driver_running(self.r.wt), pid)
         lock.write_text("999999999")
         self.assertEqual(h.driver_running(self.r.wt), 0, "a stale lock counts as no driver")
+        if ps_works():
+            lock.write_text(str(os.getpid()))
+            self.assertEqual(h.driver_running(self.r.wt), 0, "a live pid that is not a driver: the OS reused it")
+
+    def test_acquire_driver_lock(self):
+        lock = h.driver_lock(self.r.wt)
+        self.assertEqual(h.acquire_driver_lock(self.r.wt), 0)
+        self.assertEqual(lock.read_text(), str(os.getpid()))
+        lock.unlink()
+        pid = fake_driver(self)
+        lock.write_text(str(pid))
+        self.assertEqual(h.acquire_driver_lock(self.r.wt), pid, "a live driver keeps its lock")
+        lock.write_text("999999999")
+        self.assertEqual(h.acquire_driver_lock(self.r.wt), 0, "a dead driver's lock is taken over")
+        self.assertEqual(lock.read_text(), str(os.getpid()))
+
+    def test_a_second_driver_refuses_to_run(self):
+        h.driver_lock(self.r.wt).write_text(str(fake_driver(self)))
+        f = h.locate(self.r.root, "feat")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = h.Driver(self.r.root, self.r.cfg(), f, "", "").run()
+        self.assertEqual(code, h.EXIT_ERROR)
+        self.assertIn("is already running feat", err.getvalue())
+        self.assertFalse(h.driver_stamp(self.r.wt).exists(), "it stops before announcing a start")
 
 
 # ----------------------------------------------------------------------------- check rules
@@ -1044,7 +1087,7 @@ class Commands(Case):
         self.assertIn("1 working", out)
         self.assertIn("(agent working)", out)
         self.stub("role_working", lambda role, slug: False)
-        h.driver_lock(self.r.wt).write_text(str(os.getpid()))
+        h.driver_lock(self.r.wt).write_text(str(fake_driver(self)))
         _, out = self.output(h.cmd_status, Namespace())
         self.assertIn("(driver running)", out)
         h.driver_lock(self.r.wt).unlink()

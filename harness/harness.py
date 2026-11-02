@@ -705,16 +705,48 @@ def stamp_value(stamp: Path) -> tuple:
         return ()
 
 
+def is_driver_process(pid: int) -> bool:
+    """False when `pid` runs something other than `harness.py drive` (the OS reused a dead driver's pid). When
+    `ps` cannot say (missing, or blocked by a sandbox), trust the live pid."""
+    try:
+        p = subprocess.run(["ps", "-p", str(pid), "-o", "command="], text=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if p.returncode != 0:
+        return bool(p.stderr.strip())  # silent: no such process (it just died); an error: unknown, trust the pid
+    return "harness.py" in p.stdout and " drive" in p.stdout
+
+
 def driver_running(wt: Path) -> int:
     """pid of a live driver for this worktree, else 0."""
     try:
         pid = int(driver_lock(wt).read_text().strip())
         os.kill(pid, 0)
-        return pid
     except (FileNotFoundError, ValueError, ProcessLookupError):
         return 0
     except OSError:
-        return pid
+        pass  # alive, owned by someone else
+    return pid if is_driver_process(pid) else 0
+
+
+def acquire_driver_lock(wt: Path) -> int:
+    """Take the driver lock atomically: 0 when it is ours now, else the pid of the driver holding it. A lock left by
+    a dead driver (or by a pid the OS has reused) is replaced."""
+    lock = driver_lock(wt)
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            pid = driver_running(wt)
+            if pid:
+                return pid
+            with contextlib.suppress(FileNotFoundError):
+                lock.unlink()
+            continue
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(os.getpid()))
+        return 0
+    return driver_running(wt) or -1
 
 
 def driver_tab_pane(ws_id: str) -> str | None:
@@ -754,6 +786,9 @@ def launch_driver(root: Path, wt: Path, slug: str, msg: str, notify_pane: str) -
         if stamp_value(stamp) != before:
             return pane
         time.sleep(0.5)
+    pid = driver_running(wt)
+    if pid:  # another `drive --tab` won the lock first
+        raise HerdrError("driver_running", f"a driver (pid {pid}) is already running {slug}")
     raise HerdrError(
         "driver_not_started", f"the driver did not start in pane {pane}; look at it: herdr pane read {pane} --lines 40"
     )
@@ -1206,7 +1241,11 @@ class Driver:
         self.fails = 0  # checks sent back in a row
 
     def run(self) -> int:
-        self.lock.write_text(str(os.getpid()))
+        holder = acquire_driver_lock(self.wt)
+        if holder:
+            who = f"a driver (pid {holder})" if holder > 0 else "another driver"
+            print(f"error: {who} is already running {self.slug}", file=sys.stderr)
+            return EXIT_ERROR
         driver_stamp(self.wt).write_text(f"{os.getpid()} {datetime.now():%Y-%m-%d %H:%M:%S}\n")
         self.log(
             f"driving {self.slug} in {self.wt}" + (f"; will notify pane {self.notify_pane}" if self.notify_pane else "")
