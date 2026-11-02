@@ -53,6 +53,7 @@ DONE_WHEN = {  # on-disk evidence that a role finished its job
     "reviewer": lambda st, vd: vd in VERDICTS,
 }
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
+FEATURE_FILES = ("spec.md", "tasks.md", "review.md", "log.md")
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
 TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
 # sdd §3: WHILE/WHEN/WHERE clauses (combinable), an optional `IF ..., THEN`, then `THE <subject> SHALL <response>`
@@ -571,69 +572,188 @@ class WorktreeSetup:
             print("setup_cmd:", "ok" if code == 0 else f"FAILED (exit {code}); fix it in the worktree\n{out[-800:]}")
 
 
-# ----------------------------------------------------------------------------- frontmatter / features
-def fm_read(path: Path) -> dict:
-    try:
-        return fm_parse(path.read_text())
-    except FileNotFoundError:
-        return {}
+# ----------------------------------------------------------------------------- feature files
+class Markdown:
+    """The two things the launcher reads in markdown: `## ` sections and HTML comments."""
+
+    @staticmethod
+    def without_comments(text: str) -> str:
+        return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+    @staticmethod
+    def section(text: str, heading: str) -> list[str]:
+        """The lines under `## <heading>` (case-insensitive) up to the next `## `."""
+        out, inside = [], False
+        for line in text.splitlines():
+            if line.startswith("## "):
+                inside = line[3:].strip().lower() == heading.lower()
+                continue
+            if inside:
+                out.append(line)
+        return out
 
 
-def fm_parse(text: str) -> dict:
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    out = {}
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if ":" in line:
-            k, v = line.split(":", 1)
-            out[k.strip()] = v.strip()
-    return out
+class Frontmatter:
+    """The `---` header of a markdown file: flat `key: value` lines (`status` in spec.md, `verdict` in review.md)."""
 
-
-def fm_set(path: Path, key: str, value: str):
-    lines = path.read_text().splitlines()
-    if not lines or lines[0].strip() != "---":
-        lines = ["---", f"{key}: {value}", "---", *lines]
-    else:
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                lines.insert(i, f"{key}: {value}")
+    @staticmethod
+    def parse(text: str) -> dict:
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}
+        out = {}
+        for line in lines[1:]:
+            if line.strip() == "---":
                 break
-            if lines[i].split(":", 1)[0].strip() == key:
-                lines[i] = f"{key}: {value}"
-                break
-    path.write_text("\n".join(lines) + "\n")
+            if ":" in line:
+                k, v = line.split(":", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    @classmethod
+    def read(cls, path: Path) -> dict:
+        try:
+            return cls.parse(path.read_text())
+        except FileNotFoundError:
+            return {}
+
+    @staticmethod
+    def set(path: Path, key: str, value: str):
+        lines = path.read_text().splitlines()
+        if not lines or lines[0].strip() != "---":
+            lines = ["---", f"{key}: {value}", "---", *lines]
+        else:
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    lines.insert(i, f"{key}: {value}")
+                    break
+                if lines[i].split(":", 1)[0].strip() == key:
+                    lines[i] = f"{key}: {value}"
+                    break
+        path.write_text("\n".join(lines) + "\n")
 
 
-def section(text: str, heading: str) -> list[str]:
-    out, inside = [], False
-    for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line[3:].strip().lower() == heading.lower()
-            continue
-        if inside:
-            out.append(line)
-    return out
+@dataclass(frozen=True)
+class Task:
+    """One `- [ ] T<n>: <text> (R1, R2)` line of tasks.md."""
+
+    id: str
+    text: str
+    ticked: bool
+
+    @property
+    def cites(self) -> set[str]:
+        return set(re.findall(r"\bR\d+\b", self.text))
 
 
-def requirement_lines(spec_text: str) -> list[str]:
-    text = re.sub(r"<!--.*?-->", "", spec_text, flags=re.S)
-    return [line.strip() for line in section(text, "Requirements") if REQ_RE.match(line.strip())]
+class FeatureFiles:
+    """The folder harness/features/<slug>/ in one checkout: what spec.md, tasks.md, review.md and log.md say, and the
+    lifecycle writes the launcher itself commits there (approve, block, clear a review)."""
 
+    def __init__(self, checkout: Path, slug: str):
+        self.checkout, self.slug, self.git = Path(checkout), slug, Git(checkout)
+        self.rel = f"harness/features/{slug}/"  # as git names it
+        self.dir = self.checkout / "harness" / "features" / slug
+        self.spec, self.tasks_md, self.review, self.log = (self.dir / n for n in FEATURE_FILES)
 
-def feature_dir(root: Path, slug: str) -> Path:
-    return root / "harness" / "features" / slug
+    # --- reading
+    @property
+    def status(self) -> str:
+        return Frontmatter.read(self.spec).get("status", "")
 
+    @property
+    def verdict(self) -> str:
+        return Frontmatter.read(self.review).get("verdict", "")
 
-def feature_state(fdir: Path) -> tuple[str, str]:
-    return fm_read(fdir / "spec.md").get("status", ""), fm_read(fdir / "review.md").get("verdict", "")
+    def state(self) -> tuple[str, str]:
+        return self.status, self.verdict
+
+    def spec_text(self) -> str:
+        """spec.md without its HTML comments (the template's guidance is never content)."""
+        return Markdown.without_comments(self.spec.read_text())
+
+    @staticmethod
+    def requirement_lines(spec_text: str) -> list[str]:
+        """The `- R<n>: ...` lines under ## Requirements, as written: what rule 11 freezes."""
+        text = Markdown.without_comments(spec_text)
+        return [line.strip() for line in Markdown.section(text, "Requirements") if REQ_RE.match(line.strip())]
+
+    def requirements(self) -> tuple[dict[str, str], list[str]]:
+        """({id: text}, ids that appear more than once)."""
+        reqs, dups = {}, []
+        for line in Markdown.section(self.spec_text(), "Requirements"):
+            m = REQ_RE.match(line.strip())
+            if m:
+                if m[1] in reqs:
+                    dups.append(m[1])
+                reqs[m[1]] = m[2].strip()
+        return reqs, dups
+
+    @staticmethod
+    def active(reqs: dict[str, str]) -> dict[str, str]:
+        return {k: v for k, v in reqs.items() if v.rstrip(".").strip().lower() != "withdrawn"}
+
+    def open_questions(self) -> list[str]:
+        return [line for line in Markdown.section(self.spec_text(), "Open questions") if line.strip()]
+
+    def tasks(self) -> list[Task] | None:
+        """The task lines of tasks.md in order; None when the file is missing."""
+        if not self.tasks_md.exists():
+            return None
+        found = (TASK_RE.match(line.strip()) for line in self.tasks_md.read_text().splitlines())
+        return [Task(m[2], m[3], m[1] != " ") for m in found if m]
+
+    # --- history on this branch
+    def approve_commits(self, base: str) -> list[str]:
+        """The commits `approve` made on this branch, newest first."""
+        grep = f"^{self.slug}: spec approved$"
+        return self.git.run("log", "--format=%H", "--grep", grep, f"{base}..HEAD", check=False).splitlines()
+
+    def approved_once(self, base: str) -> bool:
+        return bool(self.approve_commits(base))
+
+    def review_rounds(self, base: str) -> int:
+        """Review rounds on this branch that ended in CHANGES_REQUESTED: the verdicts the launcher cleared
+        (`drop_review` commits, one per round however often the reviewer committed), plus the verdict on disk now."""
+        review = self.rel + "review.md"
+        grep = f"^{self.slug}: clear previous review$"
+        clears = self.git.run("log", "--format=%H", "--grep", grep, f"{base}..HEAD", "--", review, check=False)
+        verdicts = [Frontmatter.parse(self.git.show(f"{sha}^", review)).get("verdict", "") for sha in clears.split()]
+        return [*verdicts, self.verdict].count("CHANGES_REQUESTED")
+
+    # --- the launcher's own writes, each committed
+    def approve(self, branch: str):
+        Frontmatter.set(self.spec, "status", "approved")
+        self.git.commit(f"{self.slug}: spec approved", self.rel + "spec.md")
+        print(f"approved {self.slug} (committed on '{branch}')")
+
+    def block(self, reason: str):
+        """Set status blocked, record why in log.md, commit. Used when the launcher itself stops a feature."""
+        Frontmatter.set(self.spec, "status", "blocked")
+        head = "" if self.log.exists() else "# Log\n"
+        with self.log.open("a") as fh:
+            fh.write(f"{head}\n## {datetime.now():%Y-%m-%d %H:%M} launcher\n- blockers: {reason}\n")
+        self.git.commit(f"{self.slug}: blocked by the launcher", self.rel)
+
+    def mark_done(self):
+        """`merge`, on the base branch: status done, committed."""
+        Frontmatter.set(self.spec, "status", "done")
+        self.git.commit(f"{self.slug}: done", self.rel + "spec.md")
+
+    def drop_review(self):
+        """Remove review.md (committed when tracked), so a verdict on disk always belongs to the current code."""
+        rel = self.rel + "review.md"
+        if self.git.ok("ls-files", "--error-unmatch", rel):
+            self.git.run("rm", "-q", rel)
+            self.git.run("commit", "-q", "-m", f"{self.slug}: clear previous review", "--", rel)
+        elif self.review.exists():
+            self.review.unlink()
 
 
 @dataclass(frozen=True)
 class Feature:
+    """A feature as `status` finds it across every worktree."""
+
     slug: str
     wt: Path  # the checkout holding its folder: its own worktree while live, else the base checkout
     branch: str  # that checkout's branch
@@ -641,47 +761,52 @@ class Feature:
     verdict: str
 
     @property
+    def files(self) -> FeatureFiles:
+        return FeatureFiles(self.wt, self.slug)
+
+    @property
     def dir(self) -> Path:
-        return feature_dir(self.wt, self.slug)
+        return self.files.dir
 
     @property
     def live(self) -> bool:
         return self.branch == self.slug
 
-
-def features_everywhere(root: Path) -> dict[str, Feature]:
-    """slug -> Feature across every worktree; a worktree on the feature's own branch wins over the base copy."""
-    found: dict[str, Feature] = {}
-    for wt, branch in Git(root).worktrees():
-        if not wt.exists():
-            continue
-        for spec in sorted((wt / "harness" / "features").glob("*/spec.md")):
-            slug = spec.parent.name
-            if slug.startswith("_"):
+    @classmethod
+    def all(cls, root: Path) -> dict[str, Feature]:
+        """slug -> Feature across every worktree; a worktree on the feature's own branch wins over the base copy."""
+        found: dict[str, Feature] = {}
+        for wt, branch in Git(root).worktrees():
+            if not wt.exists():
                 continue
-            if slug not in found or branch == slug:
-                st, vd = feature_state(spec.parent)
-                found[slug] = Feature(slug, wt, branch, st, vd)
-    return found
+            for spec in sorted((wt / "harness" / "features").glob("*/spec.md")):
+                slug = spec.parent.name
+                if slug.startswith("_"):
+                    continue
+                if slug not in found or branch == slug:
+                    found[slug] = cls(slug, wt, branch, *FeatureFiles(wt, slug).state())
+        return found
+
+    @classmethod
+    def find(cls, root: Path, slug: str) -> Feature:
+        f = cls.all(root).get(slug)
+        if not f:
+            die(f"no feature '{slug}' in any worktree (see: harness.py status)")
+        return f
+
+    @classmethod
+    def live_one(cls, root: Path, slug: str) -> Feature:
+        """The feature, which must have its own worktree."""
+        f = cls.find(root, slug)
+        if not f.live:
+            die(
+                f"'{slug}' has no live worktree (status {f.status or '?'} on '{f.branch or 'detached'}'); "
+                f"create one with: harness.py start {slug}"
+            )
+        return f
 
 
-def locate(root: Path, slug: str) -> Feature:
-    f = features_everywhere(root).get(slug)
-    if not f:
-        die(f"no feature '{slug}' in any worktree (see: harness.py status)")
-    return f
-
-
-def live_worktree(root: Path, slug: str) -> Feature:
-    f = locate(root, slug)
-    if not f.live:
-        die(
-            f"'{slug}' has no live worktree (status {f.status or '?'} on '{f.branch or 'detached'}'); "
-            f"create one with: harness.py start {slug}"
-        )
-    return f
-
-
+# ----------------------------------------------------------------------------- lifecycle words
 def next_action(st: str, vd: str, gates: dict | None = None) -> str:
     gates = gates or {}
     if st == "review":
@@ -714,61 +839,6 @@ def state_text(st: str, vd: str, gates: dict, running: str = "") -> str:
     if st == "blocked":
         return "blocked · needs you"
     return "done" if st == "done" else f"{st or '?'} · fix status"
-
-
-def approve_commits(wt: Path, slug: str, base: str) -> list[str]:
-    """The commits `approve` made on this branch, newest first."""
-    return (
-        Git(wt)
-        .run("log", "--format=%H", "--grep", f"^{slug}: spec approved$", f"{base}..HEAD", check=False)
-        .splitlines()
-    )
-
-
-def approved_once(wt: Path, slug: str, base: str) -> bool:
-    return bool(approve_commits(wt, slug, base))
-
-
-def review_rounds(wt: Path, slug: str, base: str) -> int:
-    """Review rounds on this branch that ended in CHANGES_REQUESTED: the verdicts the launcher cleared (`drop_review`
-    commits, one per round however often the reviewer committed), plus the verdict on disk now."""
-    review = f"harness/features/{slug}/review.md"
-    clears = Git(wt).run(
-        "log", "--format=%H", "--grep", f"^{slug}: clear previous review$", f"{base}..HEAD", "--", review,
-        check=False,
-    ).splitlines()  # fmt: skip
-    verdicts = [fm_parse(Git(wt).show(f"{sha}^", review)).get("verdict", "") for sha in clears]
-    verdicts.append(feature_state(feature_dir(wt, slug))[1])
-    return verdicts.count("CHANGES_REQUESTED")
-
-
-def block_feature(wt: Path, slug: str, reason: str):
-    """Set status blocked, record why in log.md, commit. Used when the launcher itself stops a feature."""
-    fdir = feature_dir(wt, slug)
-    fm_set(fdir / "spec.md", "status", "blocked")
-    log = fdir / "log.md"
-    head = "" if log.exists() else "# Log\n"
-    with log.open("a") as fh:
-        fh.write(f"{head}\n## {datetime.now():%Y-%m-%d %H:%M} launcher\n- blockers: {reason}\n")
-    Git(wt).commit(f"{slug}: blocked by the launcher", f"harness/features/{slug}")
-
-
-def drop_review(root: Path, slug: str):
-    review = feature_dir(root, slug) / "review.md"
-    rel = review.relative_to(root)
-    if Git(root).proc("ls-files", "--error-unmatch", rel, check=False).returncode == 0:
-        Git(root).run("rm", "-q", rel)
-        Git(root).run("commit", "-q", "-m", f"{slug}: clear previous review", "--", rel)  # already staged by rm
-    elif review.exists():
-        review.unlink()
-
-
-def approve_spec(wt: Path, slug: str, branch: str):
-    spec = feature_dir(wt, slug) / "spec.md"
-    fm_set(spec, "status", "approved")
-    rel = spec.relative_to(wt)
-    Git(wt).commit(f"{slug}: spec approved", rel)
-    print(f"approved {slug} (committed on '{branch}')")
 
 
 # ----------------------------------------------------------------------------- herdr
@@ -1091,174 +1161,184 @@ def prompt_or_start(
 
 
 # ----------------------------------------------------------------------------- check
-def scope_errors(wt: Path, slug: str, st: str, vd: str, base: str) -> list[str]:
-    """Rules 7-11 of docs/sdd.md §7: what the branch, the spec phase and the reviewer may touch."""
-    mine = f"harness/features/{slug}/"
-    errs = []
-    for p in Git(wt).changed_paths(base):
-        if p.startswith("harness/") and not p.startswith(mine):
-            errs.append(f"{slug}: touches harness/ outside its folder: {p}")
-        elif st in ("pending", "spec_ready", "approved") and not p.startswith(mine):
-            errs.append(f"{slug}: changes files outside its folder before the spec is approved: {p}")
-    ref = REVIEW_REF.format(slug=slug)
-    if vd and Git(wt).ref_exists(ref):
-        errs += reviewer_errors(wt, slug, base, ref)
-    if st == "review" and vd == "APPROVED" and not Git(wt).ref_exists(ref):  # rule 10
-        errs.append(
-            f"{slug}: review.md says APPROVED but the launcher never started a reviewer round; run the reviewer"
-        )
-    if st in ("approved", "in_progress", "review"):  # rule 11: the approved requirements are the contract
-        approved = approve_commits(wt, slug, base)
-        if approved:
-            then = requirement_lines(Git(wt).show(approved[0], f"{mine}spec.md"))
-            if then != requirement_lines((wt / mine / "spec.md").read_text()):
-                errs.append(
-                    f"{slug}: ## Requirements differs from the approved spec; "
-                    "never change a requirement after approval (ask for a new spec round instead)"
-                )
-    return errs
+class Checker:
+    """The rules of docs/sdd.md §7 for one feature in one checkout, one method per rule. `errors()` runs those that
+    apply at the feature's status (rules 1-5 and 7-11); rule 6, the tests, is `tests()`."""
 
+    def __init__(self, checkout: Path, slug: str, base: str):
+        self.files, self.git = FeatureFiles(checkout, slug), Git(checkout)
+        self.slug, self.base, self.checkout = slug, base, Path(checkout)
+        self.ref = REVIEW_REF.format(slug=slug)
 
-def reviewer_errors(wt: Path, slug: str, base: str, ref: str) -> list[str]:
-    """Rule 9: since `ref`, the reviewer's commits (not from the base branch, no merges) and the working tree changed
-    nothing but review.md and the status line of spec.md. A path touched and put back is fine."""
-    mine = f"harness/features/{slug}/"
-    errs = []
-    touched = Git(wt).paths("log", "--format=", "--name-only", "--no-merges", f"{ref}..HEAD", f"^{base}")
-    status = {p: xy for xy, p in Git(wt).porcelain()}
-    for p in sorted(touched | status.keys()):
-        diff = Git(wt).run("diff", ref, "--", p, check=False).splitlines()  # working tree vs the reviewer's start
-        if not diff and status.get(p) != "??":
-            continue
-        changed = [line for line in diff if line[:1] in "+-" and not line.startswith(("+++", "---"))]
-        if p == mine + "spec.md":
-            if any(line[1:].split(":")[0].strip() != "status" for line in changed):
-                errs.append(f"{slug}: the reviewer changed more than the status line in spec.md")
-        elif p != mine + "review.md":
-            errs.append(f"{slug}: the reviewer changed {p} (only review.md and the status line of spec.md are allowed)")
-    return errs
-
-
-def spec_errors(slug: str, text: str, st: str) -> tuple[list[str], dict, dict]:
-    """Rule 2. Returns (errors, all requirements, active requirements)."""
-    errs, reqs = [], {}
-    for line in section(text, "Requirements"):
-        m = REQ_RE.match(line.strip())
-        if m:
-            if m[1] in reqs:
-                errs.append(f"{slug}: duplicate requirement id {m[1]}")
-            reqs[m[1]] = m[2].strip()
-    active = {k: v for k, v in reqs.items() if v.rstrip(".").strip().lower() != "withdrawn"}
-    if not active:
-        errs.append(f"{slug}: no active requirement line '- R<n>: ... SHALL ...' under ## Requirements")
-    for k, v in active.items():
-        shalls = len(re.findall(r"\bSHALL\b", v))
-        if shalls == 0:
-            errs.append(f"{slug}: {k} has no SHALL")
-        elif shalls > 1:
-            errs.append(f"{slug}: {k} has {shalls} SHALLs; one per requirement")
-        elif not EARS_RE.match(v):
-            errs.append(f"{slug}: {k} follows no EARS pattern ({EARS_HINT})")
-    errs += placeholder_errors(slug, active.items())
-    if st != "blocked" and any(line.strip() for line in section(text, "Open questions")):
-        errs.append(f"{slug}: ## Open questions is not empty (answer them or set status blocked)")
-    return errs, reqs, active
-
-
-def placeholder_errors(slug: str, items) -> list[str]:
-    """Rules 2-3: (id, text) pairs that still hold the template's first placeholder."""
-    errs = []
-    for item_id, text in items:
-        found = [t for t in TEMPLATE_PLACEHOLDERS if t in text]
-        if found:
-            token = min(found, key=text.find)
-            errs.append(f"{slug}: {item_id} still has the template placeholder {token}")
-    return errs
-
-
-def task_errors(slug: str, tasks_path: Path, reqs: dict, active: dict) -> tuple[list[str], list[tuple[str, str, str]]]:
-    """Rule 3. Returns (errors, tasks as (box, id, text))."""
-    if not tasks_path.exists():
-        return [f"{slug}: missing tasks.md"], []
-    errs, tasks, covered = [], [], set()
-    for line in tasks_path.read_text().splitlines():
-        m = TASK_RE.match(line.strip())
-        if not m:
-            continue
-        tasks.append((m[1], m[2], m[3]))
-        cited = set(re.findall(r"\bR\d+\b", m[3]))
-        if not cited:
-            errs.append(f"{slug}: {m[2]} cites no requirement")
-        errs += [f"{slug}: {m[2]} cites unknown {c}" for c in sorted(cited - reqs.keys())]
-        covered |= cited
-    if not tasks:
-        errs.append(f"{slug}: no task line '- [ ] T<n>: ... (R<n>)' in tasks.md")
-    errs += placeholder_errors(slug, [(tid, text) for _, tid, text in tasks])
-    errs += [
-        f"{slug}: {r} is not covered by any task" for r in sorted(active.keys() - covered, key=lambda x: int(x[1:]))
-    ]
-    return errs, tasks
-
-
-def token_pattern(slug: str, r: str) -> str:
-    """git grep -E pattern for the token `<slug>:<R>` as a whole: not inside `x<slug>:`, `a-<slug>:`, `<R>0` or `<R>x`.
-    Slugs are [a-z0-9-] and ids R<digits>, so neither needs escaping."""
-    return f"(^|[^A-Za-z0-9_-]){slug}:{r}([^A-Za-z0-9_]|$)"
-
-
-def done_errors(root: Path, slug: str, active: dict, tasks: list) -> list[str]:
-    """Rules 4-5: every active R has its token in a test, every task is ticked, log.md exists."""
-    errs = []
-    for r in sorted(active, key=lambda x: int(x[1:])):
-        pattern = token_pattern(slug, r)
-        p = Git(root).proc("grep", "--untracked", "-q", "-E", pattern, "--", ".", ":!harness", check=False)
-        if p.returncode != 0:
-            errs.append(f"{slug}: no test carries the token {slug}:{r}")
-    errs += [f"{slug}: {tid} is not ticked" for box, tid, _ in tasks if box == " "]
-    if not (feature_dir(root, slug) / "log.md").exists():
-        errs.append(f"{slug}: missing log.md")
-    return errs
-
-
-def check_feature(root: Path, slug: str, base: str) -> list[str]:
-    """Rules 1-5 and 7-11 of docs/sdd.md §7 for one feature in this checkout. Returns violations."""
-    fdir = feature_dir(root, slug)
-    spec_path, tasks_path = fdir / "spec.md", fdir / "tasks.md"
-    if not spec_path.exists():
-        return [f"{slug}: missing spec.md"]
-    st = fm_read(spec_path).get("status", "")
-    if st not in STATUSES:  # rule 1
-        return [f"{slug}: spec.md status '{st or '(none)'}' is not one of {', '.join(STATUSES)}"]
-    errs = []
-    if st != "done" and not Git(root).is_main():  # rules 7-11 apply to a feature branch
-        errs += scope_errors(root, slug, st, fm_read(fdir / "review.md").get("verdict", ""), base)
-    if RANK[st] < 1:
+    def errors(self) -> list[str]:
+        f = self.files
+        if not f.spec.exists():
+            return [f"{self.slug}: missing spec.md"]
+        st, vd = f.state()
+        if st not in STATUSES:
+            return self.status_known(st)
+        errs = []
+        if st != "done" and not self.git.is_main():  # rules 7-11 apply to a feature branch
+            errs += self.scope(st)
+            if vd and self.git.ref_exists(self.ref):
+                errs += self.reviewer_scope()
+            errs += self.verdict_origin(st, vd) + self.frozen_requirements(st)
+        if RANK[st] < 1:
+            return errs
+        errs += self.requirements(st) + self.tasks()
+        if RANK[st] >= 4:
+            errs += self.tokens() + self.done()
         return errs
-    text = re.sub(r"<!--.*?-->", "", spec_path.read_text(), flags=re.S)
-    spec_errs, reqs, active = spec_errors(slug, text, st)
-    task_errs, tasks = task_errors(slug, tasks_path, reqs, active)
-    errs += spec_errs + task_errs
-    if RANK[st] >= 4:
-        errs += done_errors(root, slug, active, tasks)
-    return errs
 
+    # --- rule 1
+    def status_known(self, st: str) -> list[str]:
+        return [f"{self.slug}: spec.md status '{st or '(none)'}' is not one of {', '.join(STATUSES)}"]
 
-def run_tests(root: Path, cfg: Config) -> list[str]:
-    code, out = shell(cfg.test_cmd, root)
-    return [] if code == 0 else [f"tests failed (exit {code}: {cfg.test_cmd})\n{out}"]
+    # --- rule 2
+    def requirements(self, st: str) -> list[str]:
+        """Ids unique, at least one active requirement, each with exactly one SHALL in an EARS pattern and no template
+        placeholder; ## Open questions empty unless blocked."""
+        reqs, dups = self.files.requirements()
+        active = FeatureFiles.active(reqs)
+        errs = [f"{self.slug}: duplicate requirement id {r}" for r in dups]
+        if not active:
+            errs.append(f"{self.slug}: no active requirement line '- R<n>: ... SHALL ...' under ## Requirements")
+        for k, v in active.items():
+            shalls = len(re.findall(r"\bSHALL\b", v))
+            if shalls == 0:
+                errs.append(f"{self.slug}: {k} has no SHALL")
+            elif shalls > 1:
+                errs.append(f"{self.slug}: {k} has {shalls} SHALLs; one per requirement")
+            elif not EARS_RE.match(v):
+                errs.append(f"{self.slug}: {k} follows no EARS pattern ({EARS_HINT})")
+        errs += self.placeholders(active.items())
+        if st != "blocked" and self.files.open_questions():
+            errs.append(f"{self.slug}: ## Open questions is not empty (answer them or set status blocked)")
+        return errs
 
+    # --- rule 3
+    def tasks(self) -> list[str]:
+        """Every task cites existing requirements and keeps no placeholder; every active requirement is cited."""
+        tasks = self.files.tasks()
+        if tasks is None:
+            return [f"{self.slug}: missing tasks.md"]
+        reqs, _ = self.files.requirements()
+        errs, covered = [], set()
+        for t in tasks:
+            if not t.cites:
+                errs.append(f"{self.slug}: {t.id} cites no requirement")
+            errs += [f"{self.slug}: {t.id} cites unknown {c}" for c in sorted(t.cites - reqs.keys())]
+            covered |= t.cites
+        if not tasks:
+            errs.append(f"{self.slug}: no task line '- [ ] T<n>: ... (R<n>)' in tasks.md")
+        errs += self.placeholders((t.id, t.text) for t in tasks)
+        missing = sorted(FeatureFiles.active(reqs).keys() - covered, key=lambda r: int(r[1:]))
+        return errs + [f"{self.slug}: {r} is not covered by any task" for r in missing]
 
-def run_check(root: Path, slugs: list[str], tests: bool | None) -> list[str]:
-    """tests: None = only if any feature is at review or later; True/False = force."""
-    cfg = Config.load(root)
-    errs, need_tests = [], bool(tests)
-    for s in slugs:
-        errs += check_feature(root, s, cfg.base_branch)
-        if tests is None and RANK.get(fm_read(feature_dir(root, s) / "spec.md").get("status", ""), 0) >= 4:
-            need_tests = True
-    if need_tests:
-        errs += run_tests(root, cfg)
-    return errs
+    def placeholders(self, items) -> list[str]:
+        """(id, text) pairs that still hold the template's first placeholder."""
+        errs = []
+        for item_id, text in items:
+            found = [t for t in TEMPLATE_PLACEHOLDERS if t in text]
+            if found:
+                errs.append(f"{self.slug}: {item_id} still has the template placeholder {min(found, key=text.find)}")
+        return errs
+
+    # --- rule 4
+    @staticmethod
+    def token_pattern(slug: str, r: str) -> str:
+        """git grep -E pattern for the token `<slug>:<R>` as a whole: not inside `x<slug>:`, `a-<slug>:`, `<R>0` or
+        `<R>x`. Slugs are [a-z0-9-] and ids R<digits>, so neither needs escaping."""
+        return f"(^|[^A-Za-z0-9_-]){slug}:{r}([^A-Za-z0-9_]|$)"
+
+    def tokens(self) -> list[str]:
+        """Every active requirement has its `<slug>:R<n>` token somewhere outside harness/ (tracked or not)."""
+        active = FeatureFiles.active(self.files.requirements()[0])
+        errs = []
+        for r in sorted(active, key=lambda x: int(x[1:])):
+            grep = ("grep", "--untracked", "-q", "-E", self.token_pattern(self.slug, r), "--", ".", ":!harness")
+            if not self.git.ok(*grep):
+                errs.append(f"{self.slug}: no test carries the token {self.slug}:{r}")
+        return errs
+
+    # --- rule 5
+    def done(self) -> list[str]:
+        errs = [f"{self.slug}: {t.id} is not ticked" for t in self.files.tasks() or [] if not t.ticked]
+        return errs + ([] if self.files.log.exists() else [f"{self.slug}: missing log.md"])
+
+    # --- rule 6
+    @staticmethod
+    def tests(checkout: Path, cfg: Config) -> list[str]:
+        code, out = shell(cfg.test_cmd, checkout)
+        return [] if code == 0 else [f"tests failed (exit {code}: {cfg.test_cmd})\n{out}"]
+
+    # --- rules 7 and 8
+    def scope(self, st: str) -> list[str]:
+        """Nothing under harness/ outside the feature folder; before approval, nothing outside it at all."""
+        errs, mine = [], self.files.rel
+        for p in self.git.changed_paths(self.base):
+            if p.startswith("harness/") and not p.startswith(mine):
+                errs.append(f"{self.slug}: touches harness/ outside its folder: {p}")
+            elif st in ("pending", "spec_ready", "approved") and not p.startswith(mine):
+                errs.append(f"{self.slug}: changes files outside its folder before the spec is approved: {p}")
+        return errs
+
+    # --- rule 9
+    def reviewer_scope(self) -> list[str]:
+        """Since the review ref, the reviewer's commits (not from the base branch, no merges) and the working tree
+        changed nothing but review.md and the status line of spec.md. A path touched and put back is fine."""
+        mine, errs = self.files.rel, []
+        touched = self.git.paths("log", "--format=", "--name-only", "--no-merges", f"{self.ref}..HEAD", f"^{self.base}")
+        status = {p: xy for xy, p in self.git.porcelain()}
+        for p in sorted(touched | status.keys()):
+            diff = self.git.run("diff", self.ref, "--", p, check=False).splitlines()  # working tree vs review start
+            if not diff and status.get(p) != "??":
+                continue
+            changed = [line for line in diff if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+            if p == mine + "spec.md":
+                if any(line[1:].split(":")[0].strip() != "status" for line in changed):
+                    errs.append(f"{self.slug}: the reviewer changed more than the status line in spec.md")
+            elif p != mine + "review.md":
+                errs.append(
+                    f"{self.slug}: the reviewer changed {p} (only review.md and the status line of spec.md are allowed)"
+                )
+        return errs
+
+    # --- rule 10
+    def verdict_origin(self, st: str, vd: str) -> list[str]:
+        """An APPROVED verdict exists only if the launcher started a reviewer round."""
+        if st == "review" and vd == "APPROVED" and not self.git.ref_exists(self.ref):
+            why = "review.md says APPROVED but the launcher never started a reviewer round; run the reviewer"
+            return [f"{self.slug}: {why}"]
+        return []
+
+    # --- rule 11
+    def frozen_requirements(self, st: str) -> list[str]:
+        """After approval, ## Requirements equals the one in the last `<slug>: spec approved` commit."""
+        if st not in ("approved", "in_progress", "review"):
+            return []
+        approved = self.files.approve_commits(self.base)
+        if not approved:
+            return []
+        then = FeatureFiles.requirement_lines(self.git.show(approved[0], self.files.rel + "spec.md"))
+        if then != FeatureFiles.requirement_lines(self.files.spec.read_text()):
+            return [
+                f"{self.slug}: ## Requirements differs from the approved spec; "
+                "never change a requirement after approval (ask for a new spec round instead)"
+            ]
+        return []
+
+    @classmethod
+    def run(cls, checkout: Path, slugs: list[str], tests: bool | None) -> list[str]:
+        """`check`: the rules for each feature, then the tests. tests: None = only if any feature is at review or
+        later; True/False = force."""
+        cfg = Config.load(checkout)
+        errs, need_tests = [], bool(tests)
+        for s in slugs:
+            errs += cls(checkout, s, cfg.base_branch).errors()
+            if tests is None and RANK.get(FeatureFiles(checkout, s).status, 0) >= 4:
+                need_tests = True
+        return errs + (cls.tests(checkout, cfg) if need_tests else [])
 
 
 # ----------------------------------------------------------------------------- running a role
@@ -1282,7 +1362,7 @@ def preflight(cfg: Config, wt: Path, role: str, slug: str, st: str, vd: str, tes
             fix = f'harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"'
             return f"merging '{base}' into '{slug}' conflicts; run: {fix}"
         if moved or tests_always:
-            errs = run_check(wt, [slug], True)
+            errs = Checker.run(wt, [slug], True)
             if errs:
                 why = f" after merging '{base}'" if moved else ""
                 return (
@@ -1291,7 +1371,7 @@ def preflight(cfg: Config, wt: Path, role: str, slug: str, st: str, vd: str, tes
                     + f'\nrun: harness.py run implementer {slug} "check --tests fails; fix it, commit"'
                 )
     if role == "reviewer" or (role == "implementer" and vd == "APPROVED"):
-        drop_review(wt, slug)
+        FeatureFiles(wt, slug).drop_review()
     if role == "reviewer":
         Git(wt).set_ref(ref)
     elif role == "implementer":
@@ -1308,7 +1388,7 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Conf
     """(result, note, check errors, agent state) of a role run. DONE needs the on-disk evidence AND a green structural
     check; a reviewer whose CHANGES_REQUESTED is the max_review_rounds-th blocks the feature for the human."""
     name = agent_name(role, slug)
-    st, vd = feature_state(feature_dir(wt, slug))
+    st, vd = FeatureFiles(wt, slug).state()
     state = agent_state(name)
     errs: list[str] = []
     if not settled:
@@ -1318,20 +1398,23 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Conf
     if not DONE_WHEN[role](st, vd):
         return "NEEDS_ATTENTION", f"status {st or '?'} / verdict {vd or '-'} is not what {role} must leave", errs, state
     if role == "implementer" and vd == "APPROVED" and not Git(wt).ref_exists(REVIEW_REF.format(slug=slug)):
-        drop_review(wt, slug)  # a verdict only the reviewer may write; the reviewer runs next
+        FeatureFiles(wt, slug).drop_review()  # a verdict only the reviewer may write; the reviewer runs next
         note, vd = "discarded a verdict the implementer wrote", ""
     left = [p for _, p in Git(wt).porcelain()]
     if left:  # docs/sdd.md §6: a role that stops with uncommitted changes has not finished
         more = " ..." if len(left) > 8 else ""
         errs.append(f"{slug}: uncommitted changes left behind: {', '.join(left[:8])}{more}; commit them")
-    errs += check_feature(wt, slug, cfg.base_branch)
+    errs += Checker(wt, slug, cfg.base_branch).errors()
     if errs:
         return "NEEDS_ATTENTION", "check fails", errs, state
     cap = cfg.max_review_rounds
-    if role == "reviewer" and vd == "CHANGES_REQUESTED" and cap and review_rounds(wt, slug, cfg.base_branch) >= cap:
-        block_feature(
-            wt,
-            slug,
+    if (
+        role == "reviewer"
+        and vd == "CHANGES_REQUESTED"
+        and cap
+        and FeatureFiles(wt, slug).review_rounds(cfg.base_branch) >= cap
+    ):
+        FeatureFiles(wt, slug).block(
             f"{cap} review rounds ended in CHANGES_REQUESTED (max_review_rounds); the last findings are in review.md",
         )
         Git(wt).drop_ref(REVIEW_REF.format(slug=slug))
@@ -1342,7 +1425,7 @@ def evaluate(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Conf
 def report(wt: Path, role: str, slug: str, settled: bool, note: str, cfg: Config) -> int:
     name = agent_name(role, slug)
     result, note, errs, state = evaluate(wt, role, slug, settled, note, cfg)
-    st, vd = feature_state(feature_dir(wt, slug))
+    st, vd = FeatureFiles(wt, slug).state()
     print(f"{name}: state={state} status={st or '?'} verdict={vd or '-'} -> {result}" + (f" [{note}]" if note else ""))
     if result == "STILL_WORKING":
         print(f"next: harness.py wait {role} {slug}")
@@ -1402,7 +1485,7 @@ class Driver:
     def __init__(self, root: Path, cfg: Config, f: Feature, msg: str, notify_pane: str):
         self.root, self.cfg, self.f, self.msg, self.notify_pane = root, cfg, f, msg, notify_pane
         self.slug, self.wt, self.base, self.gates = f.slug, f.wt, cfg.base_branch, cfg.gates
-        self.fdir = f.dir
+        self.files, self.fdir = f.files, f.dir
         self.lock = driver_lock(self.wt)
         self.fails = 0  # checks sent back in a row
 
@@ -1430,7 +1513,7 @@ class Driver:
         print(f"[{datetime.now():%H:%M}]", text)
 
     def stop(self, text: str, code: int = EXIT_DONE):
-        st, vd = feature_state(self.fdir)
+        st, vd = self.files.state()
         sidebar(self.wt, state_text(st, vd, self.gates))
         line = f"harness: {self.slug} {text}"
         self.log(line)
@@ -1439,7 +1522,7 @@ class Driver:
         raise _Stop(code)
 
     def step(self):
-        st, vd = feature_state(self.fdir)
+        st, vd = self.files.state()
         sidebar(self.wt, state_text(st, vd, self.gates))
         text, self.msg = self.msg, ""
         role, text = self.choose(next_action(st, vd, self.gates), st, text)
@@ -1453,7 +1536,7 @@ class Driver:
             self.wait_role(role, False, "", time.time())
             self.msg = text
             return
-        st, vd = feature_state(self.fdir)
+        st, vd = self.files.state()
         err = preflight(self.cfg, self.wt, role, self.slug, st, vd)
         if err:
             self.stop(f"cannot run {role}: {err}", EXIT_ERROR)
@@ -1461,10 +1544,10 @@ class Driver:
 
     def auto_approve(self) -> tuple[str | None, str]:
         """Approve a green spec; a red one goes back to the spec author with the errors."""
-        errs = check_feature(self.wt, self.slug, self.base)
+        errs = Checker(self.wt, self.slug, self.base).errors()
         if errs:
             return "spec_author", "check fails:\n" + "\n".join(errs) + "\nFix the spec, commit."
-        approve_spec(self.wt, self.slug, self.f.branch)
+        self.files.approve(self.f.branch)
         return None, ""
 
     def require_clean(self):
@@ -1506,7 +1589,7 @@ class Driver:
                     f"blocked, needs you: read `## Open questions` in {self.fdir / 'spec.md'} "
                     f'and {self.fdir / "log.md"}; answer with `harness.py drive {self.slug} "<answer>" --tab`'
                 )
-            return ("implementer" if approved_once(self.wt, self.slug, self.base) else "spec_author"), text
+            return ("implementer" if self.files.approved_once(self.base) else "spec_author"), text
         if st == "done":
             self.stop("is done")
         self.stop(f"has a status the lifecycle does not know ('{st}'); fix spec.md", EXIT_ERROR)
@@ -1517,14 +1600,12 @@ class Driver:
         ok, _ = Git(self.wt).merge_in(self.base)
         if not ok:
             return "implementer", SYNC_MSG.format(base=self.base)
-        errs = run_check(self.wt, [self.slug], True)
+        errs = Checker.run(self.wt, [self.slug], True)
         if not errs:
             return "reviewer", text
         self.fails += 1
         if self.fails > FIX_TRIES:
-            block_feature(
-                self.wt, self.slug, f"check --tests still fails after {FIX_TRIES} fixes; last output in the driver tab"
-            )
+            self.files.block(f"check --tests still fails after {FIX_TRIES} fixes; last output in the driver tab")
             self.stop(f"blocked, needs you: check keeps failing after {FIX_TRIES} fixes", EXIT_ATTENTION)
         return "implementer", "check --tests fails on the branch:\n" + "\n".join(errs)[-1500:] + "\nFix it, commit."
 
@@ -1560,14 +1641,14 @@ class Driver:
         if result == "DONE":
             self.fails = 0
             return
-        if feature_state(self.fdir)[0] == "blocked":  # the launcher blocked it (review cap): the human decides
+        if self.files.state()[0] == "blocked":  # the launcher blocked it (review cap): the human decides
             self.stop(f"blocked, needs you: {note}; read {self.fdir / 'log.md'}", EXIT_ATTENTION)
         if errs and self.fails < FIX_TRIES:  # a failed check goes back; the loop picks the role from the status
             self.fails += 1
             self.msg = "check fails:\n" + "\n".join(errs) + "\nFix it, commit."
             return
         if errs:
-            block_feature(self.wt, self.slug, f"check still fails after {FIX_TRIES} fixes: " + "; ".join(errs)[:500])
+            self.files.block(f"check still fails after {FIX_TRIES} fixes: " + "; ".join(errs)[:500])
             self.stop(f"blocked, needs you: check keeps failing after {FIX_TRIES} fixes", EXIT_ATTENTION)
         self.stop(
             f"needs you: {role} stopped ({note or 'see its screen'}); "
@@ -1691,7 +1772,7 @@ class Doctor:
 
     def git_leftovers(self, base: str):
         root = self.root
-        feats = features_everywhere(root)
+        feats = Feature.all(root)
         wts = Git(root).worktrees()
         live = {branch for _, branch in wts}
         for wt, branch in wts[1:]:
@@ -1713,7 +1794,7 @@ class Doctor:
         for b in Git(root).run("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines():
             spec = root / "harness" / "features" / b / "spec.md"
             if b != base and b not in live and spec.exists():
-                st = fm_read(spec).get("status", "?")
+                st = Frontmatter.read(spec).get("status", "?")
                 fix = f"git branch -D {b}" if st == "done" else f"herdr worktree open --cwd {root} --branch {b}"
                 self.check(False, f"branch '{b}' has no worktree (its feature is {st} on {base})", fix)
         for ref in Git(root).run("for-each-ref", "--format=%(refname)", "refs/harness", check=False).splitlines():
@@ -1798,7 +1879,7 @@ def role_working(role: str, slug: str) -> bool:
 def cmd_status(a):
     root = Git.here().path
     gates = Config.load(root).gates
-    feats = features_everywhere(root)
+    feats = Feature.all(root)
     if not feats:
         print('no features yet. start one: harness.py start <slug> "intent"')
         return 0
@@ -1834,15 +1915,15 @@ def cmd_check(a):
     root = Git.here().path
     if a.slug:
         slugs = [a.slug]
-        if not (feature_dir(root, a.slug) / "spec.md").exists():
-            root = locate(root, a.slug).wt  # the feature lives in another worktree: check it there
+        if not FeatureFiles(root, a.slug).spec.exists():
+            root = Feature.find(root, a.slug).wt  # the feature lives in another worktree: check it there
             print(f"checking {a.slug} in {root}")
     else:
         slugs = sorted(
             p.name for p in (root / "harness" / "features").glob("*") if p.is_dir() and not p.name.startswith("_")
         )
     tests = True if a.tests else (False if a.no_tests else None)
-    errs = run_check(root, slugs, tests)
+    errs = Checker.run(root, slugs, tests)
     if errs:
         print("\n".join(errs))
         return 1
@@ -1859,7 +1940,7 @@ def start_preconditions(root: Path, cfg: Config, slug: str):
         die(f"run start from the base branch '{cfg.base_branch}' (currently on '{Git(root).branch() or 'detached'}')")
     if Git(root).ref_exists(f"refs/heads/{slug}"):
         die(f"branch '{slug}' already exists")
-    if slug in features_everywhere(root):
+    if slug in Feature.all(root):
         die(f"feature '{slug}' already exists (see: harness.py status)")
     if not (root / "harness" / "features" / "_template" / "spec.md").exists():
         die("harness/features/_template/spec.md is missing")
@@ -1891,7 +1972,7 @@ def create_worktree(root: Path, slug: str, base: str, trust: bool) -> dict:
 
 def seed_feature(wt: Path, slug: str, intent: str):
     """The feature folder from the template, committed on the new branch."""
-    fdir = feature_dir(wt, slug)
+    fdir = FeatureFiles(wt, slug).dir
     shutil.copytree(wt / "harness" / "features" / "_template", fdir)
     title = slug.replace("-", " ").capitalize()
     intent = intent or "To be defined with the human: ask what this feature must do before writing requirements."
@@ -1949,7 +2030,7 @@ def cmd_start(a):
 def cmd_run(a):
     root = Git.here().path
     cfg = Config.load(root)
-    f = live_worktree(root, a.slug)
+    f = Feature.live_one(root, a.slug)
     pid = driver_running(f.wt)
     if pid:
         die(
@@ -1969,7 +2050,7 @@ def cmd_run(a):
 def cmd_wait(a):
     root = Git.here().path
     cfg = Config.load(root)
-    wt = live_worktree(root, a.slug).wt
+    wt = Feature.live_one(root, a.slug).wt
     name = agent_name(a.role, a.slug)
     settled, note = wait_agent(name, a.timeout)
     if note == "agent_not_found":
@@ -1980,14 +2061,14 @@ def cmd_wait(a):
 def cmd_approve(a):
     root = Git.here().path
     cfg = Config.load(root)
-    f = locate(root, a.slug)
+    f = Feature.find(root, a.slug)
     if f.status != "spec_ready":
         die(f"'{a.slug}' is '{f.status or '(none)'}', expected spec_ready")
-    errs = check_feature(f.wt, a.slug, cfg.base_branch)
+    errs = Checker(f.wt, a.slug, cfg.base_branch).errors()
     if errs:
         print("\n".join(errs))
         die("fix the spec before approving")
-    approve_spec(f.wt, a.slug, f.branch)
+    f.files.approve(f.branch)
     sidebar(f.wt, state_text("approved", "", cfg.gates))
     text = (
         f"Spec approved. Continue: run `harness.py drive {a.slug} --tab` (or `run implementer {a.slug}`) now; "
@@ -1999,7 +2080,7 @@ def cmd_approve(a):
 def cmd_drive(a):
     root = Git.here().path
     cfg = Config.load(root)
-    f = live_worktree(root, a.slug)
+    f = Feature.live_one(root, a.slug)
     pid = driver_running(f.wt)
     if pid:
         die(f"a driver (pid {pid}) is already running {a.slug}")
@@ -2023,7 +2104,7 @@ def merge_preconditions(root: Path, cfg: Config, slug: str) -> Feature:
         die(f"run merge from the base branch '{base}' (currently on '{Git(root).branch() or 'detached'}')")
     if Git(root).dirty():
         die("the main checkout has uncommitted changes; commit or stash them first")
-    f = locate(root, slug)
+    f = Feature.find(root, slug)
     if not f.live or f.wt == root:
         die(f"no live worktree on branch '{slug}' (already merged?)")
     if f.status != "review" or f.verdict != "APPROVED":
@@ -2045,15 +2126,12 @@ def land(root: Path, wt: Path, slug: str, base: str):
             f'  harness.py run implementer {slug} "{SYNC_MSG.format(base=base)}"\n'
             f"  (or: harness.py drive {slug} --tab)\nthen run merge again"
         )
-    errs = run_check(wt, [slug], True)
+    errs = Checker.run(wt, [slug], True)
     if errs:
         print("\n".join(errs))
         die("check failed on the merged worktree; not merging")
     Git(root).run("merge", "--no-ff", "--no-edit", slug)
-    spec = feature_dir(root, slug) / "spec.md"
-    fm_set(spec, "status", "done")
-    rel = spec.relative_to(root)
-    Git(root).commit(f"{slug}: done", rel)
+    FeatureFiles(root, slug).mark_done()
 
 
 def remove_worktree(root: Path, wt: Path, slug: str, cfg: Config):

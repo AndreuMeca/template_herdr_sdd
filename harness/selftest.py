@@ -117,7 +117,7 @@ class Repo:
         self.git("update-ref", "refs/harness/feat/review-start", rev, cwd=self.wt)
 
     def check(self):
-        return h.check_feature(self.wt, "feat", "main")
+        return h.Checker(self.wt, "feat", "main").errors()
 
     def cfg(self):
         return h.Config.load(self.wt)
@@ -318,21 +318,21 @@ class PureFunctions(unittest.TestCase):
     def test_frontmatter(self):
         p = Path(tempfile.mkdtemp()) / "spec.md"
         p.write_text("---\nstatus: pending\n---\n# T\n")
-        self.assertEqual(h.fm_read(p), {"status": "pending"})
-        h.fm_set(p, "status", "review")
-        h.fm_set(p, "extra", "1")
-        self.assertEqual(h.fm_read(p), {"status": "review", "extra": "1"})
+        self.assertEqual(h.Frontmatter.read(p), {"status": "pending"})
+        h.Frontmatter.set(p, "status", "review")
+        h.Frontmatter.set(p, "extra", "1")
+        self.assertEqual(h.Frontmatter.read(p), {"status": "review", "extra": "1"})
         self.assertTrue(p.read_text().endswith("# T\n"))
         p.write_text("# no frontmatter\n")
-        self.assertEqual(h.fm_read(p), {})
-        h.fm_set(p, "status", "x")
-        self.assertEqual(h.fm_read(p), {"status": "x"})
-        self.assertEqual(h.fm_read(p.parent / "missing.md"), {})
+        self.assertEqual(h.Frontmatter.read(p), {})
+        h.Frontmatter.set(p, "status", "x")
+        self.assertEqual(h.Frontmatter.read(p), {"status": "x"})
+        self.assertEqual(h.Frontmatter.read(p.parent / "missing.md"), {})
 
     def test_section_and_requirements(self):
         text = "## A\n1\n## Requirements\n<!-- c -->\n- R1: SHALL x\n- R2: withdrawn\nnote\n## B\n"
-        self.assertEqual(h.section(text, "a"), ["1"])
-        self.assertEqual(h.requirement_lines(text), ["- R1: SHALL x", "- R2: withdrawn"])
+        self.assertEqual(h.Markdown.section(text, "a"), ["1"])
+        self.assertEqual(h.FeatureFiles.requirement_lines(text), ["- R1: SHALL x", "- R2: withdrawn"])
 
     def test_next_action_and_groups(self):
         gates = {"approve": "human", "merge": "auto"}
@@ -577,13 +577,13 @@ class GitHelpers(Case):
         self.assertFalse(h.Git(self.r.wt).ref_exists(ref))
 
     def test_features_everywhere(self):
-        feats = h.features_everywhere(self.r.root)
+        feats = h.Feature.all(self.r.root)
         f = feats["feat"]
         self.assertEqual((f.slug, f.branch, f.status, f.verdict, f.live), ("feat", "feat", "pending", "", True))
         self.assertEqual(f.wt.resolve(), self.r.wt.resolve())
-        self.assertEqual(h.locate(self.r.wt, "feat").dir, f.dir)
+        self.assertEqual(h.Feature.find(self.r.wt, "feat").dir, f.dir)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            h.locate(self.r.root, "nope")
+            h.Feature.find(self.r.root, "nope")
 
     def test_sync_base(self):
         self.assertEqual(h.Git(self.r.wt).merge_in("main"), (True, False))
@@ -609,41 +609,41 @@ class GitHelpers(Case):
         )
 
     def test_approve_commits_and_review_rounds(self):
-        self.assertFalse(h.approved_once(self.r.wt, "feat", "main"))
+        self.assertFalse(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
-        h.approve_spec(self.r.wt, "feat", "feat")
-        self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
-        self.assertEqual(h.review_rounds(self.r.wt, "feat", "main"), 0)
+        h.FeatureFiles(self.r.wt, "feat").approve("feat")
+        self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").review_rounds("main"), 0)
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        h.drop_review(self.r.wt, "feat")
+        h.FeatureFiles(self.r.wt, "feat").drop_review()
         self.r.review("APPROVED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        self.assertEqual(h.review_rounds(self.r.wt, "feat", "main"), 1, "an APPROVED round does not count")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").review_rounds("main"), 1, "an APPROVED round does not count")
         self.assertIn("feat: clear previous review", self.r.git("log", "--format=%s", "main..HEAD", cwd=self.r.wt))
 
     def test_review_rounds_count_changes_requested_rounds_not_commits(self):
-        rounds = lambda: h.review_rounds(self.r.wt, "feat", "main")  # noqa: E731
+        rounds = lambda: h.FeatureFiles(self.r.wt, "feat").review_rounds("main")  # noqa: E731
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
         (self.r.fdir / "review.md").write_text((self.r.fdir / "review.md").read_text() + "- one more finding\n")
         self.r.commit("feat: review, one more finding", cwd=self.r.wt)
         self.assertEqual(rounds(), 1, "two commits in one round are one round")
-        h.drop_review(self.r.wt, "feat")
+        h.FeatureFiles(self.r.wt, "feat").drop_review()
         self.assertEqual(rounds(), 1, "a cleared round still counts")
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        h.drop_review(self.r.wt, "feat")
+        h.FeatureFiles(self.r.wt, "feat").drop_review()
         self.assertEqual(rounds(), 2)
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
         self.assertEqual(rounds(), 3, "the verdict on disk counts too")
 
     def test_block_feature(self):
-        h.block_feature(self.r.wt, "feat", "why")
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "blocked")
+        h.FeatureFiles(self.r.wt, "feat").block("why")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "blocked")
         log = (self.r.fdir / "log.md").read_text()
         self.assertTrue(log.startswith("# Log\n"))
         self.assertIn("launcher\n- blockers: why", log)
@@ -675,7 +675,7 @@ class GitHelpers(Case):
 
     def test_a_second_driver_refuses_to_run(self):
         h.driver_lock(self.r.wt).write_text(str(fake_driver(self)))
-        f = h.locate(self.r.root, "feat")
+        f = h.Feature.find(self.r.root, "feat")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = h.Driver(self.r.root, self.r.cfg(), f, "", "").run()
@@ -691,7 +691,7 @@ class CheckRules(Case):
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
-        h.approve_spec(self.r.wt, "feat", "feat")
+        h.FeatureFiles(self.r.wt, "feat").approve("feat")
         self.r.spec("in_progress")
         self.r.implemented()
         self.r.commit("feat: T1", cwd=self.r.wt)
@@ -789,7 +789,7 @@ class CheckRules(Case):
         tmpl = self.r.wt / "harness" / "features" / "_template"
         for name in ("spec.md", "tasks.md"):
             (self.r.fdir / name).write_text((tmpl / name).read_text().replace("{{slug}}", "feat"))
-        h.fm_set(self.r.fdir / "spec.md", "status", "spec_ready")
+        h.Frontmatter.set(self.r.fdir / "spec.md", "status", "spec_ready")
         errs = self.r.check()
         for err in (
             "feat: R1 still has the template placeholder <trigger>",
@@ -879,12 +879,12 @@ class CheckRules(Case):
         main_feat = self.r.root / "harness" / "features" / "feat"
         shutil.copytree(self.r.fdir, main_feat)
         shutil.copy(self.r.wt / "tests" / "test_feat.py", self.r.root / "tests" / "test_feat.py")
-        h.fm_set(main_feat / "spec.md", "status", "done")
+        h.Frontmatter.set(main_feat / "spec.md", "status", "done")
         self.r.commit("feat: done")
         (self.r.root / "harness" / "harness.py").write_text("# local edit\n")
-        self.assertEqual(h.check_feature(self.r.root, "feat", "main"), [], "no scope rules on the main checkout")
-        self.assertEqual(h.check_feature(self.r.root, "nope", "main"), ["nope: missing spec.md"])
-        h.fm_set(self.r.fdir / "spec.md", "status", "bogus")
+        self.assertEqual(h.Checker(self.r.root, "feat", "main").errors(), [], "no scope rules on the main checkout")
+        self.assertEqual(h.Checker(self.r.root, "nope", "main").errors(), ["nope: missing spec.md"])
+        h.Frontmatter.set(self.r.fdir / "spec.md", "status", "bogus")
         self.assertEqual(len(self.r.check()), 1)
         self.assertIn("is not one of", self.r.check()[0])
 
@@ -934,7 +934,7 @@ class RoleRuns(Case):
         self.r.commit("feat: review", cwd=self.r.wt)
         result, note, _, _ = h.evaluate(self.r.wt, "reviewer", "feat", True, "", self.r.cfg())
         self.assertEqual((result, note), ("NEEDS_ATTENTION", "blocked after 1 review rounds"))
-        self.assertEqual(h.feature_state(self.r.fdir), ("blocked", "CHANGES_REQUESTED"))
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state(), ("blocked", "CHANGES_REQUESTED"))
         self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
         self.assertIn("max_review_rounds", (self.r.fdir / "log.md").read_text())
 
@@ -1050,7 +1050,7 @@ class DriverTests(Case):
                 self.doCleanups()
 
     def drive(self, msg="", notify="pane"):
-        f = h.locate(self.r.root, "feat")
+        f = h.Feature.find(self.r.root, "feat")
         return self.output(h.Driver(self.r.root, self.r.cfg(), f, msg, notify).run)
 
     def stuck_role(self, max_minutes, settle_after):
@@ -1097,7 +1097,7 @@ class DriverTests(Case):
         self.assertEqual(code, h.EXIT_DONE)
         self.assertEqual([role for role, _ in self.calls], ["spec_author", "implementer", "reviewer"])
         self.assertEqual(self.merged, ["feat"])
-        self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
+        self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
         self.assertIn("run reviewer", out)
         self.assertEqual(h.driver_running(self.r.wt), 0)
 
@@ -1107,7 +1107,7 @@ class DriverTests(Case):
         self.assertEqual(code, h.EXIT_DONE)
         self.assertEqual(len(self.notes), 1)
         self.assertIn("harness: feat spec ready, needs you", self.notes[0])
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "spec_ready")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "spec_ready")
         self.assertEqual(h.driver_running(self.r.wt), 0)
         self.assertFalse(self.merged)
 
@@ -1145,7 +1145,7 @@ class DriverTests(Case):
         self.assertEqual(
             [role for role, _ in self.calls], ["spec_author", "implementer", "reviewer", "implementer", "reviewer"]
         )
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "blocked")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "blocked")
         self.assertIn("blocked, needs you", self.notes[-1])
         self.assertFalse(self.merged)
 
@@ -1256,8 +1256,8 @@ class Commands(Case):
         self.r.commit("feat: spec fixed", cwd=self.r.wt)
         code, _ = self.output(h.cmd_approve, Namespace(slug="feat"))
         self.assertEqual(code, 0)
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "approved")
-        self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "approved")
+        self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
 
     def test_merge_reports_a_failure_to_the_notify_pane(self):
         self.chdir(self.r.root)
@@ -1279,7 +1279,7 @@ class Commands(Case):
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
-        h.approve_spec(self.r.wt, "feat", "feat")
+        h.FeatureFiles(self.r.wt, "feat").approve("feat")
         self.r.spec("review")
         self.r.implemented()
         self.r.commit("feat: T1", cwd=self.r.wt)
@@ -1293,7 +1293,9 @@ class Commands(Case):
         self.assertIn("merged feat into main", out)
         self.assertEqual(notes[-1][0], "wB:p2")
         self.assertIn("harness: feat merged into main at", notes[-1][1])
-        self.assertEqual(h.fm_read(self.r.root / "harness" / "features" / "feat" / "spec.md")["status"], "done")
+        self.assertEqual(
+            h.Frontmatter.read(self.r.root / "harness" / "features" / "feat" / "spec.md")["status"], "done"
+        )
         self.assertTrue((self.r.root / "tests" / "test_feat.py").exists())
         self.assertFalse(self.r.wt.exists())
         self.assertNotIn("feat", self.r.git("branch", "--format=%(refname:short)"))
