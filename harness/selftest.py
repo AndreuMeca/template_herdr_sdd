@@ -120,10 +120,15 @@ class Repo:
         return h.check_feature(self.wt, "feat", "main")
 
     def cfg(self):
-        return h.load_cfg(self.wt)
+        return h.Config.load(self.wt)
 
     def close(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+def agent(raw: dict, role: str = "orchestrator"):
+    """An AgentConfig parsed the way the launcher parses config.json (the orchestrator needs no permissions)."""
+    return h.AgentConfig.parse(role, raw, "test")
 
 
 def fake_driver(case) -> int:
@@ -381,10 +386,8 @@ class PureFunctions(unittest.TestCase):
             ("codex", "full"): ["--dangerously-bypass-approvals-and-sandbox"],
         }
         for (kind, level), flags in cases.items():
-            self.assertEqual(
-                h.agent_cli_args({"kind": kind, "permissions": level}, repo), ["--", *flags], (kind, level)
-            )
-        self.assertEqual(h.agent_cli_args({"kind": "pi", "permissions": "full"}, repo), [], "pi never asks: no flag")
+            self.assertEqual(agent({"kind": kind, "permissions": level}).cli_args(repo), ["--", *flags], (kind, level))
+        self.assertEqual(agent({"kind": "pi", "permissions": "full"}).cli_args(repo), [], "pi never asks: no flag")
 
     def test_patterns_args_prompt(self):
         self.assertTrue(h.valid_pattern(".env"))
@@ -392,12 +395,14 @@ class PureFunctions(unittest.TestCase):
         for bad in ("/etc/passwd", "../x", "", ".", 3):
             self.assertFalse(h.valid_pattern(bad), bad)
         repo = Path("/r")
-        self.assertEqual(h.agent_cli_args({"kind": "claude"}, repo), [])
-        self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}, repo), ["--", "--model", "m", "-x"])
-        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "extra"}, repo), ["--", "--effort", "xhigh"])
+        self.assertEqual(agent({"kind": "claude"}).cli_args(repo), [])
         self.assertEqual(
-            h.agent_cli_args(
-                {"kind": "codex", "model": "g", "effort": "high", "permissions": "full", "args": ["-y"]}, repo
+            agent({"kind": "gemini", "model": "m", "args": ["-x"]}).cli_args(repo), ["--", "--model", "m", "-x"]
+        )
+        self.assertEqual(agent({"kind": "claude", "effort": "extra"}).cli_args(repo), ["--", "--effort", "xhigh"])
+        self.assertEqual(
+            agent({"kind": "codex", "model": "g", "effort": "high", "permissions": "full", "args": ["-y"]}).cli_args(
+                repo
             ),
             [
                 "--",
@@ -410,9 +415,9 @@ class PureFunctions(unittest.TestCase):
             ],
             "model, effort, permissions, then args",
         )
-        self.assertEqual(h.agent_cli_args({"kind": "gemini", "effort": "high", "permissions": "full"}, repo), [])
+        self.assertEqual(agent({"kind": "gemini", "effort": "high", "permissions": "full"}).cli_args(repo), [])
         self.assertEqual(
-            h.agent_cli_args({"args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}, repo),
+            agent({"kind": "gemini", "args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}).cli_args(repo),
             ["--", "--add-dir", "/r/.git", "-c", "x={a}"],
             "{repo} is the main checkout; other braces stay as written",
         )
@@ -425,15 +430,15 @@ class PureFunctions(unittest.TestCase):
 # ----------------------------------------------------------------------------- config and worktree files
 class ConfigTests(Case):
     def test_claude_settings_from_the_orchestrator_entry(self):
-        self.assertEqual(h.claude_settings({"kind": "claude"}), {"permissions": {"defaultMode": "default"}})
+        self.assertEqual(agent({"kind": "claude"}).claude_settings(), {"permissions": {"defaultMode": "default"}})
         self.assertEqual(
-            h.claude_settings({"kind": "claude", "model": "m", "permissions": "full"}),
+            agent({"kind": "claude", "model": "m", "permissions": "full"}).claude_settings(),
             {"permissions": {"defaultMode": "bypassPermissions"}, "model": "m"},
         )
         modes = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
         for level, mode in modes.items():
             self.assertEqual(
-                h.claude_settings({"kind": "claude", "permissions": level})["permissions"]["defaultMode"], mode
+                agent({"kind": "claude", "permissions": level}).claude_settings()["permissions"]["defaultMode"], mode
             )
 
     def test_write_local_settings(self):
@@ -446,7 +451,7 @@ class ConfigTests(Case):
                 "orchestrator": {"kind": "claude", "model": "m", "permissions": "full"},
             }
         )
-        line = h.write_local_settings(self.r.root, self.r.cfg())
+        line = h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply()
         self.assertIn("model m, permissions bypassPermissions", line)
         self.assertIn("updated; restart", line)
         written = json.loads(p.read_text())
@@ -458,9 +463,9 @@ class ConfigTests(Case):
                 "model": "m",
             },
         )
-        self.assertIn("unchanged", h.write_local_settings(self.r.root, self.r.cfg()))
+        self.assertIn("unchanged", h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply())
         self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "codex"}})
-        self.assertIn("left alone", h.write_local_settings(self.r.root, self.r.cfg()))
+        self.assertIn("left alone", h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply())
         self.assertEqual(json.loads(p.read_text())["model"], "m")
 
     def test_defaults_and_main_checkout(self):
@@ -472,7 +477,9 @@ class ConfigTests(Case):
         (self.r.wt / "harness" / "config.json").write_text(
             json.dumps({"base_branch": "main", "test_cmd": "false", "agents": AGENTS})
         )
-        self.assertEqual(h.load_cfg(self.r.wt).test_cmd, "true", "config comes from the main checkout, not the branch")
+        self.assertEqual(
+            h.Config.load(self.r.wt).test_cmd, "true", "config comes from the main checkout, not the branch"
+        )
 
     def test_rejects_bad_files(self):
         bad = [
@@ -487,10 +494,10 @@ class ConfigTests(Case):
         for raw in bad:
             (self.r.root / "harness" / "config.json").write_text(json.dumps(raw))
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-                h.load_cfg(self.r.root)
+                h.Config.load(self.r.root)
         (self.r.root / "harness" / "config.json").write_text("{")
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            h.load_cfg(self.r.root)
+            h.Config.load(self.r.root)
 
     def test_rejects_agents_outside_the_vocabulary(self):
         full = {"kind": "claude", "permissions": "full"}
@@ -521,16 +528,16 @@ class ConfigTests(Case):
             self.r.write_cfg(agents={**AGENTS, **agents})
             err = io.StringIO()
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
-                h.load_cfg(self.r.root)
+                h.Config.load(self.r.root)
             self.assertIn(msg, err.getvalue(), why)
         self.r.write_cfg(agents={**AGENTS, "reviewer": {"kind": "gemini", "permissions": "full", "args": ["--yolo"]}})
         self.assertEqual(
-            h.load_cfg(self.r.root).agents["reviewer"]["kind"], "gemini", "an untranslated CLI: flags in args"
+            h.Config.load(self.r.root).agent("reviewer").kind, "gemini", "an untranslated CLI: flags in args"
         )
 
     def test_worktreeinclude(self):
         (self.r.root / ".worktreeinclude").write_text("# comment\n\n.env\ndata\n../up\n")
-        pats, bad = h.include_patterns(self.r.root, self.r.cfg())
+        pats, bad = h.WorktreeSetup(self.r.root, self.r.root, self.r.cfg()).patterns()
         self.assertEqual((pats, bad), ([".env", "data"], ["../up"]))
 
     def test_copy_ignored(self):
@@ -541,7 +548,7 @@ class ConfigTests(Case):
         os.symlink("sub/db", root / "data" / "link")
         dst = self.r.tmp / "dst"
         dst.mkdir()
-        line = h.copy_ignored(root, dst, [".env", "data", "data/*", "src/m.py", "nope"])
+        line = h.WorktreeSetup(root, dst, self.r.cfg()).copy_ignored([".env", "data", "data/*", "src/m.py", "nope"])
         self.assertIn("copied .env, data", line)
         self.assertIn("not in the main checkout: nope", line)
         self.assertIn("skipped, not gitignored: src/m.py", line)
@@ -549,7 +556,11 @@ class ConfigTests(Case):
         self.assertEqual((dst / "data" / "sub" / "db").read_text(), "db")
         self.assertTrue((dst / "data" / "link").is_symlink())
         self.assertFalse((dst / "src").exists())
-        self.assertIn("copied .env, data", h.copy_ignored(root, dst, [".env", "data"]), "a second run must not fail")
+        self.assertIn(
+            "copied .env, data",
+            h.WorktreeSetup(root, dst, self.r.cfg()).copy_ignored([".env", "data"]),
+            "a second run must not fail",
+        )
 
 
 # ----------------------------------------------------------------------------- git helpers
@@ -1295,7 +1306,9 @@ class HerdrAdapter(Case):
     ACFG = {"kind": "claude", "model": "m", "effort": "high", "permissions": "full"}
 
     def test_prompt_or_start_starts_the_agent_in_its_own_tab(self):
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, self.ACFG)
+        settled, note = h.prompt_or_start(
+            self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, agent(self.ACFG)
+        )
         self.assertEqual((settled, note), (True, ""))
         self.assertEqual(
             self.calls("tab", "create"),
@@ -1329,13 +1342,15 @@ class HerdrAdapter(Case):
 
     def test_repo_placeholder_is_the_main_checkout(self):
         acfg = {"kind": "codex", "args": ["--add-dir", "{repo}/.git"]}
-        h.prompt_or_start(self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, acfg)  # from inside the worktree
+        h.prompt_or_start(
+            self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, agent(acfg)
+        )  # from inside the worktree
         self.assertEqual(self.calls("agent", "start")[0][-2:], ["--add-dir", f"{self.r.root.resolve()}/.git"])
 
     def test_startup_dialogs_are_answered(self):
         self.state.update(start_status="blocked", screen="Do you trust this folder? (y/n)")
         self.save_state()
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, self.ACFG)
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, agent(self.ACFG))
         self.assertEqual((settled, note), (True, ""))
         self.assertEqual(
             self.calls("agent", "send-keys"),
@@ -1343,12 +1358,12 @@ class HerdrAdapter(Case):
         )
         self.state.update(screen="Something unexpected?", agents={})
         self.save_state()
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, self.ACFG)
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, agent(self.ACFG))
         self.assertEqual((settled, note), (True, "blocked at startup"))
         self.state.update(screen="Do you trust this folder? (y/n)", agents={})
         self.save_state()
         codex = {"kind": "codex", "permissions": "full"}
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, codex)
+        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, agent(codex))
         self.assertEqual(note, "blocked at startup", "a dialog is answered only for the CLI known to show it")
         self.assertEqual(len(self.calls("agent", "send-keys")), 2)
 
@@ -1357,12 +1372,13 @@ class HerdrAdapter(Case):
         self.state["prompt_error"] = "timeout"
         self.save_state()
         self.assertEqual(
-            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, self.ACFG), (False, "")
+            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)), (False, "")
         )
         self.state["prompt_error"] = "agent_blocked"
         self.save_state()
         self.assertEqual(
-            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, self.ACFG), (True, "agent_blocked")
+            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)),
+            (True, "agent_blocked"),
         )
         self.assertEqual(self.calls("agent", "start"), [], "an existing agent is never started again")
         self.assertEqual(h.agent_state("impl-feat"), "idle")

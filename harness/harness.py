@@ -41,6 +41,7 @@ STATUSES = ["pending", "spec_ready", "approved", "in_progress", "review", "done"
 RANK = {"pending": 0, "blocked": 0, "spec_ready": 1, "approved": 2, "in_progress": 3, "review": 4, "done": 5}
 VERDICTS = ("APPROVED", "CHANGES_REQUESTED")
 ROLES = {"spec_author": "spec", "implementer": "impl", "reviewer": "rev"}
+AGENT_ROLES = ("orchestrator", *ROLES)  # every entry of agents in config.json
 RUN_GATE = {
     "spec_author": {"pending", "spec_ready", "blocked"},
     "implementer": {"approved", "in_progress", "review", "blocked"},
@@ -261,7 +262,92 @@ def valid_pattern(x) -> bool:
 
 
 @dataclass(frozen=True)
+class AgentConfig:
+    """One `agents.<role>` entry of config.json, in the file's own words (see EFFORT_LEVELS, PERMISSION_LEVELS);
+    its Cli (when the launcher knows the CLI) turns them into flags."""
+
+    role: str
+    kind: str
+    model: str = ""
+    effort: str = ""
+    permissions: str = ""
+    args: tuple = ()
+
+    @classmethod
+    def parse(cls, role: str, raw, where: str) -> AgentConfig:
+        """The entry after checking it; dies naming the first problem. The flags `effort` and `permissions` translate
+        to are never written by hand in `args`."""
+        if not isinstance(raw, dict) or not raw.get("kind"):
+            die(f"{where}.kind is required")
+        kind, effort, perm = raw["kind"], raw.get("effort", ""), raw.get("permissions", "")
+        cli = CLIS.get(kind)
+        if not isinstance(effort, str) or (effort and effort not in EFFORT_LEVELS):
+            hint = f" ('{effort}' is the provider's word; here it is '{PROVIDER_EFFORTS[effort]}')" if (
+                effort in PROVIDER_EFFORTS
+            ) else ""  # fmt: skip
+            die(f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}{hint}")
+        if not isinstance(perm, str) or (perm and perm not in PERMISSION_LEVELS):
+            die(f"{where}.permissions must be one of {', '.join(PERMISSION_LEVELS)}")
+        if role in ROLES and perm not in ROLE_PERMISSIONS:
+            why = f"'{perm}' would stop it at its first prompt" if perm else "it is required"
+            die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(ROLE_PERMISSIONS)}")
+        if cli and perm and perm not in cli.permissions:
+            die(f"{where}.permissions '{perm}' is not available for {kind} (it has: {', '.join(cli.permissions)})")
+        args = raw.get("args") or []
+        if not isinstance(args, list):
+            die(f"{where}.args must be a list of strings")
+        own = [a for a in args if str(a).startswith(PERMISSION_FLAGS)]
+        if cli and perm and own:
+            die(f"{where}.args sets permissions itself ({own[0]}); `permissions: {perm}` already does, drop the flag")
+        return cls(role, kind, raw.get("model") or "", effort, perm, tuple(str(a) for a in args))
+
+    @property
+    def cli(self) -> Cli | None:
+        return CLIS.get(self.kind)
+
+    def cli_args(self, repo: Path) -> list:
+        """The CLI flags after `--`: model, effort, permissions (translated by its Cli; a CLI not in CLIS gets
+        neither, `config` says so), then `args` verbatim. `{repo}` in any of them becomes the main checkout's path."""
+        cli = self.cli
+        model = ["--model", self.model] if self.model else []
+        flags = [*cli.effort_args(self.effort), *cli.permission_args(self.permissions)] if cli else []
+        flags = [x.replace("{repo}", str(repo)) for x in [*flags, *self.args]]
+        return ["--", *model, *flags] if (model or flags) else []
+
+    def claude_settings(self) -> dict:
+        """What Claude Code should start with in this repo when this is the orchestrator: its model, and the
+        permission mode of its `permissions` level (CLAUDE_MODES; unset = ask = Claude Code's default)."""
+        out: dict = {"permissions": {"defaultMode": CLAUDE_MODES[self.permissions or "ask"]}}
+        if self.model:
+            out["model"] = self.model
+        return out
+
+    def describe(self) -> list[str]:
+        """How `config` shows its effort and permissions: our words, then what its CLI is given."""
+        cli, effort, perm = self.cli, self.effort, self.permissions
+        if not effort:
+            e = "effort       - (the CLI's default)"
+        elif not cli:
+            e = f"effort       {effort} (not translated for {self.kind}: put its flag in args)"
+        else:
+            native = cli.efforts[effort]
+            e = f"effort       {effort}" + (f" ({self.kind}: {native})" if native != effort else "")
+        if not perm:
+            p = "permissions  - (the CLI's default)"
+        elif not cli:
+            p = f"permissions  {perm} (not translated for {self.kind}: put its flags in args)"
+        else:
+            flags = " ".join(cli.permissions[perm]) or "no flag needed"
+            how = f"; {cli.guarded_by}" if perm == "guarded" and cli.guarded_by else ""
+            p = f"permissions  {perm}: {PERMISSION_WORDS[perm]}{how} ({flags})"
+        return [e, p] + (["args         " + " ".join(self.args)] if self.args else [])
+
+
+@dataclass(frozen=True)
 class Config:
+    """harness/config.json, checked. Always the main checkout's copy: a branch cannot change what it is checked
+    with."""
+
     base_branch: str
     test_cmd: str
     setup_cmd: str
@@ -270,206 +356,186 @@ class Config:
     max_review_rounds: int
     max_role_minutes: int
     gates: dict  # "approve" / "merge" -> "human" | "auto"
-    agents: dict  # role -> {"kind", "model", "args"}
+    agents: dict  # role -> AgentConfig
 
-
-def validate_agents(agents: dict, p: Path):
-    """Every role has a CLI kind, and effort and permissions in this file's own words (EFFORT_LEVELS,
-    PERMISSION_LEVELS) that its CLI can take; the flags they translate to are never written by hand in `args`."""
-    for role in ("orchestrator", *ROLES):
-        acfg = agents.get(role)
-        if not isinstance(acfg, dict) or not acfg.get("kind"):
-            die(f"{p}: agents.{role}.kind is required")
-        where, cli = f"{p}: agents.{role}", CLIS.get(acfg["kind"])
-        effort = acfg.get("effort", "")
-        if not isinstance(effort, str) or (effort and effort not in EFFORT_LEVELS):
-            hint = f" ('{effort}' is the provider's word; here it is '{PROVIDER_EFFORTS[effort]}')" if (
-                effort in PROVIDER_EFFORTS
-            ) else ""  # fmt: skip
-            die(f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}{hint}")
-        perm = acfg.get("permissions", "")
-        if not isinstance(perm, str) or (perm and perm not in PERMISSION_LEVELS):
-            die(f"{where}.permissions must be one of {', '.join(PERMISSION_LEVELS)}")
-        if role in ROLES and perm not in ROLE_PERMISSIONS:
-            why = f"'{perm}' would stop it at its first prompt" if perm else "it is required"
-            die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(ROLE_PERMISSIONS)}")
-        if cli and perm and perm not in cli.permissions:
-            has = ", ".join(cli.permissions)
-            die(f"{where}.permissions '{perm}' is not available for {acfg['kind']} (it has: {has})")
-        args = acfg.get("args") or []
-        if not isinstance(args, list):
-            die(f"{where}.args must be a list of strings")
-        own = [a for a in args if str(a).startswith(PERMISSION_FLAGS)]
-        if cli and perm and own:
-            die(f"{where}.args sets permissions itself ({own[0]}); `permissions: {perm}` already does, drop the flag")
-
-
-def validate_cfg(raw: dict, p: Path) -> dict:
-    """The gates of a config file after checking every key; dies naming the first problem."""
-    for key in ("base_branch", "test_cmd", "agents"):
-        if key not in raw:
-            die(f"{p}: missing '{key}'")
-    validate_agents(raw["agents"], p)
-    gates = {gate: (raw.get("gates") or {}).get(gate, "human") for gate in ("approve", "merge")}
-    for gate, who in gates.items():
-        if who not in ("human", "auto"):
-            die(f"{p}: gates.{gate} must be 'human' or 'auto'")
-    copy_files = raw.get("copy_files", [])
-    if not isinstance(copy_files, list) or not all(valid_pattern(x) for x in copy_files):
-        die(f"{p}: copy_files must be a list of paths or globs relative to the repo root")
-    for key, default in (("max_review_rounds", 3), ("max_role_minutes", DEFAULT_ROLE_MINUTES)):
-        n = raw.get(key, default)
-        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
-            die(f"{p}: {key} must be an integer >= 0 (0 = no limit)")
-    for key in ("setup_cmd", "teardown_cmd"):
-        if not isinstance(raw.get(key, ""), str):
-            die(f'{p}: {key} must be a shell command or ""')
-    return gates
-
-
-def load_cfg(root: Path) -> Config:
-    """The main checkout's config, wherever `root` is: a branch cannot change what it is checked with."""
-    p = main_checkout(root) / "harness" / "config.json"
-    try:
-        raw = json.loads(p.read_text())
-    except FileNotFoundError:
-        die(f"missing {p}")
-    except json.JSONDecodeError as e:
-        die(f"{p}: {e}")
-    gates = validate_cfg(raw, p)
-    return Config(
-        base_branch=raw["base_branch"],
-        test_cmd=raw["test_cmd"],
-        setup_cmd=raw.get("setup_cmd", ""),
-        teardown_cmd=raw.get("teardown_cmd", ""),
-        copy_files=tuple(raw.get("copy_files", [])),
-        max_review_rounds=raw.get("max_review_rounds", 3),
-        max_role_minutes=raw.get("max_role_minutes", DEFAULT_ROLE_MINUTES),
-        gates=gates,
-        agents=raw["agents"],
-    )
-
-
-def claude_settings(acfg: dict) -> dict:
-    """What Claude Code should start with in this repo, read off the orchestrator entry: its model, and the
-    permission mode of its `permissions` level (CLAUDE_MODES; unset = ask = Claude Code's default)."""
-    out: dict = {"permissions": {"defaultMode": CLAUDE_MODES[acfg.get("permissions") or "ask"]}}
-    if acfg.get("model"):
-        out["model"] = acfg["model"]
-    return out
-
-
-NOT_CLAUDE = "orchestrator is not Claude Code: .claude/settings.local.json left alone"
-APPLY_CMD = "uv run harness/harness.py config --apply"
-
-
-def local_settings(root: Path, cfg: Config) -> tuple[Path, dict, dict, str] | None:
-    """(path, current, wanted, summary) of .claude/settings.local.json (per machine, gitignored) against
-    agents.orchestrator, so the Claude the human opens in this repo starts with that model and permission mode.
-    Other keys in the file are kept. None when the orchestrator is not Claude Code."""
-    acfg = cfg.agents["orchestrator"]
-    if acfg["kind"] != "claude":
-        return None
-    want = claude_settings(acfg)
-    p = root / ".claude" / "settings.local.json"
-    try:
-        current = json.loads(p.read_text()) if p.exists() else {}
-    except json.JSONDecodeError:
-        current = {}
-    new = dict(current)
-    new["permissions"] = {**(current.get("permissions") or {}), **want["permissions"]}
-    if "model" in want:
-        new["model"] = want["model"]
-    what = f"model {want.get('model', '(Claude Code default)')}, permissions {want['permissions']['defaultMode']}"
-    return p, current, new, what
-
-
-def settings_report(root: Path, cfg: Config) -> str:
-    """One read-only line: is .claude/settings.local.json in step with agents.orchestrator? Never writes: raising
-    the permissions of the next session is the human's call (`config --apply`), not an agent's."""
-    s = local_settings(root, cfg)
-    if s is None:
-        return NOT_CLAUDE
-    _, current, new, what = s
-    if new == current:
-        return f"Claude Code in this repo: {what} (in step with .claude/settings.local.json)"
-    return (
-        f"Claude Code in this repo should run with {what}, which .claude/settings.local.json does not say yet; "
-        f"to apply, run yourself: {APPLY_CMD}, then restart Claude Code"
-    )
-
-
-def write_local_settings(root: Path, cfg: Config) -> str:
-    """`config --apply`: write .claude/settings.local.json from agents.orchestrator. Returns one report line."""
-    s = local_settings(root, cfg)
-    if s is None:
-        return NOT_CLAUDE
-    p, current, new, what = s
-    if new == current:
-        return f"Claude Code in this repo: {what} (.claude/settings.local.json unchanged)"
-    p.parent.mkdir(exist_ok=True)
-    p.write_text(json.dumps(new, indent=2) + "\n")
-    return f"Claude Code in this repo: {what} (.claude/settings.local.json updated; restart Claude Code to apply)"
-
-
-def include_patterns(root: Path, cfg: Config) -> tuple[list[str], list[str]]:
-    """copy_files from config.json plus the lines of .worktreeinclude; returns (patterns, rejected lines)."""
-    pats, bad = list(cfg.copy_files), []
-    wi = root / ".worktreeinclude"
-    if wi.exists():
-        for line in wi.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if not valid_pattern(line):
-                bad.append(line)
-            elif line not in pats:
-                pats.append(line)
-    return pats, bad
-
-
-def copy_path(s: Path, d: Path):
-    """Copy a file, symlink or whole folder; the copy replaces whatever is at `d`."""
-    d.parent.mkdir(parents=True, exist_ok=True)
-    if d.is_symlink() or d.is_file():
-        d.unlink()
-    elif d.is_dir():
-        shutil.rmtree(d)
-    if s.is_dir():
-        shutil.copytree(s, d, symlinks=True)
-    else:
-        shutil.copy2(s, d, follow_symlinks=False)
-
-
-def copy_ignored(src: Path, dst: Path, patterns: list[str]) -> str:
-    """Copy the gitignored paths matching `patterns` from the main checkout `src` into the worktree `dst`.
-    Returns one report line."""
-    hits, missing = set(), []
-    for pat in patterns:
-        found = [s.relative_to(src) for s in src.glob(pat)]
-        if not found:
-            missing.append(pat)
-        hits.update(found)
-    done, skipped, failed = set(), [], []
-    for rel in sorted(hits):  # parents sort before their children
-        if any(p in done for p in rel.parents):
-            continue  # inside a folder already copied whole
-        if sh(["git", "check-ignore", "-q", rel], cwd=src, check=False).returncode != 0:
-            skipped.append(str(rel))  # tracked or not ignored: the worktree already has git's version
-            continue
+    @classmethod
+    def load(cls, root: Path) -> Config:
+        p = main_checkout(root) / "harness" / "config.json"
         try:
-            copy_path(src / rel, dst / rel)
-            done.add(rel)
-        except OSError as e:
-            failed.append(f"{rel} ({e})")
-    parts = [f"copied {', '.join(str(r) for r in sorted(done))}" if done else "nothing copied"]
-    if missing:
-        parts.append(f"not in the main checkout: {', '.join(missing)}")
-    if skipped:
-        parts.append(f"skipped, not gitignored: {', '.join(skipped)}")
-    if failed:
-        parts.append(f"FAILED: {'; '.join(failed)}")
-    return "; ".join(parts)
+            raw = json.loads(p.read_text())
+        except FileNotFoundError:
+            die(f"missing {p}")
+        except json.JSONDecodeError as e:
+            die(f"{p}: {e}")
+        return cls.parse(raw, p)
+
+    @classmethod
+    def parse(cls, raw: dict, p: Path) -> Config:
+        """The config after checking every key; dies naming the first problem."""
+        for key in ("base_branch", "test_cmd", "agents"):
+            if key not in raw:
+                die(f"{p}: missing '{key}'")
+        agents = raw["agents"] if isinstance(raw["agents"], dict) else {}
+        agents = {role: AgentConfig.parse(role, agents.get(role), f"{p}: agents.{role}") for role in AGENT_ROLES}
+        gates = {gate: (raw.get("gates") or {}).get(gate, "human") for gate in ("approve", "merge")}
+        for gate, who in gates.items():
+            if who not in ("human", "auto"):
+                die(f"{p}: gates.{gate} must be 'human' or 'auto'")
+        copy_files = raw.get("copy_files", [])
+        if not isinstance(copy_files, list) or not all(valid_pattern(x) for x in copy_files):
+            die(f"{p}: copy_files must be a list of paths or globs relative to the repo root")
+        for key, default in (("max_review_rounds", 3), ("max_role_minutes", DEFAULT_ROLE_MINUTES)):
+            n = raw.get(key, default)
+            if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                die(f"{p}: {key} must be an integer >= 0 (0 = no limit)")
+        for key in ("setup_cmd", "teardown_cmd"):
+            if not isinstance(raw.get(key, ""), str):
+                die(f'{p}: {key} must be a shell command or ""')
+        return cls(
+            base_branch=raw["base_branch"],
+            test_cmd=raw["test_cmd"],
+            setup_cmd=raw.get("setup_cmd", ""),
+            teardown_cmd=raw.get("teardown_cmd", ""),
+            copy_files=tuple(copy_files),
+            max_review_rounds=raw.get("max_review_rounds", 3),
+            max_role_minutes=raw.get("max_role_minutes", DEFAULT_ROLE_MINUTES),
+            gates=gates,
+            agents=agents,
+        )
+
+    def agent(self, role: str) -> AgentConfig:
+        return self.agents[role]
+
+
+class ClaudeSettings:
+    """.claude/settings.local.json (per machine, gitignored) against agents.orchestrator, so the Claude the human
+    opens in this repo starts with that model and permission mode. `report` only reads: raising the permissions of
+    the next session is the human's call (`config --apply` runs `apply`), never an agent's."""
+
+    NOT_CLAUDE = "orchestrator is not Claude Code: .claude/settings.local.json left alone"
+    APPLY_CMD = "uv run harness/harness.py config --apply"
+
+    def __init__(self, root: Path, orchestrator: AgentConfig):
+        self.path = root / ".claude" / "settings.local.json"
+        self.orchestrator = orchestrator
+
+    def compare(self) -> tuple[dict, dict, str] | None:
+        """(current, wanted, summary); other keys in the file are kept. None when the orchestrator is not Claude
+        Code."""
+        if self.orchestrator.kind != "claude":
+            return None
+        want = self.orchestrator.claude_settings()
+        try:
+            current = json.loads(self.path.read_text()) if self.path.exists() else {}
+        except json.JSONDecodeError:
+            current = {}
+        new = dict(current)
+        new["permissions"] = {**(current.get("permissions") or {}), **want["permissions"]}
+        if "model" in want:
+            new["model"] = want["model"]
+        mode = want["permissions"]["defaultMode"]
+        return current, new, f"model {want.get('model', '(Claude Code default)')}, permissions {mode}"
+
+    def report(self) -> str:
+        """One read-only line: is the file in step with agents.orchestrator?"""
+        s = self.compare()
+        if s is None:
+            return self.NOT_CLAUDE
+        current, new, what = s
+        if new == current:
+            return f"Claude Code in this repo: {what} (in step with .claude/settings.local.json)"
+        return (
+            f"Claude Code in this repo should run with {what}, which .claude/settings.local.json does not say yet; "
+            f"to apply, run yourself: {self.APPLY_CMD}, then restart Claude Code"
+        )
+
+    def apply(self) -> str:
+        """`config --apply`: write the file. Returns one report line."""
+        s = self.compare()
+        if s is None:
+            return self.NOT_CLAUDE
+        current, new, what = s
+        if new == current:
+            return f"Claude Code in this repo: {what} (.claude/settings.local.json unchanged)"
+        self.path.parent.mkdir(exist_ok=True)
+        self.path.write_text(json.dumps(new, indent=2) + "\n")
+        return f"Claude Code in this repo: {what} (.claude/settings.local.json updated; restart Claude Code to apply)"
+
+
+class WorktreeSetup:
+    """What a new worktree needs beyond what git tracks: the gitignored files of copy_files (plus .worktreeinclude),
+    copied from the main checkout, then setup_cmd."""
+
+    def __init__(self, root: Path, wt: Path, cfg: Config):
+        self.root, self.wt, self.cfg = root, wt, cfg
+
+    def patterns(self) -> tuple[list[str], list[str]]:
+        """copy_files from config.json plus the lines of .worktreeinclude; returns (patterns, rejected lines)."""
+        pats, bad = list(self.cfg.copy_files), []
+        wi = self.root / ".worktreeinclude"
+        if wi.exists():
+            for line in wi.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if not valid_pattern(line):
+                    bad.append(line)
+                elif line not in pats:
+                    pats.append(line)
+        return pats, bad
+
+    @staticmethod
+    def copy_path(s: Path, d: Path):
+        """Copy a file, symlink or whole folder; the copy replaces whatever is at `d`."""
+        d.parent.mkdir(parents=True, exist_ok=True)
+        if d.is_symlink() or d.is_file():
+            d.unlink()
+        elif d.is_dir():
+            shutil.rmtree(d)
+        if s.is_dir():
+            shutil.copytree(s, d, symlinks=True)
+        else:
+            shutil.copy2(s, d, follow_symlinks=False)
+
+    def copy_ignored(self, patterns: list[str]) -> str:
+        """Copy the gitignored paths matching `patterns` from the main checkout into the worktree. One report line."""
+        src, dst = self.root, self.wt
+        hits, missing = set(), []
+        for pat in patterns:
+            found = [s.relative_to(src) for s in src.glob(pat)]
+            if not found:
+                missing.append(pat)
+            hits.update(found)
+        done, skipped, failed = set(), [], []
+        for rel in sorted(hits):  # parents sort before their children
+            if any(p in done for p in rel.parents):
+                continue  # inside a folder already copied whole
+            if sh(["git", "check-ignore", "-q", rel], cwd=src, check=False).returncode != 0:
+                skipped.append(str(rel))  # tracked or not ignored: the worktree already has git's version
+                continue
+            try:
+                self.copy_path(src / rel, dst / rel)
+                done.add(rel)
+            except OSError as e:
+                failed.append(f"{rel} ({e})")
+        parts = [f"copied {', '.join(str(r) for r in sorted(done))}" if done else "nothing copied"]
+        if missing:
+            parts.append(f"not in the main checkout: {', '.join(missing)}")
+        if skipped:
+            parts.append(f"skipped, not gitignored: {', '.join(skipped)}")
+        if failed:
+            parts.append(f"FAILED: {'; '.join(failed)}")
+        return "; ".join(parts)
+
+    def run(self):
+        """Copy the gitignored files, then run setup_cmd; prints one line for each."""
+        pats, bad = self.patterns()
+        if pats or bad:
+            line = self.copy_ignored(pats) if pats else "nothing listed"
+            print("copy_files:", line + (f"; rejected .worktreeinclude lines: {', '.join(bad)}" if bad else ""))
+        if self.cfg.setup_cmd:
+            code, out = shell(self.cfg.setup_cmd, self.wt)
+            print("setup_cmd:", "ok" if code == 0 else f"FAILED (exit {code}); fix it in the worktree\n{out[-800:]}")
 
 
 # ----------------------------------------------------------------------------- frontmatter / features
@@ -884,17 +950,6 @@ def agent_name(role: str, slug: str) -> str:
     return f"{ROLES[role]}-{slug}"
 
 
-def agent_cli_args(a: dict, repo: Path) -> list:
-    """The CLI flags after `--`: model, effort, permissions (translated by the CLI's entry in CLIS; a CLI not in it
-    gets neither, `config` says so), then `args` verbatim. `{repo}` in any of them becomes the main checkout's
-    absolute path."""
-    cli = CLIS.get(a.get("kind", ""))
-    model = ["--model", a["model"]] if a.get("model") else []
-    flags = [*cli.effort_args(a.get("effort", "")), *cli.permission_args(a.get("permissions", ""))] if cli else []
-    flags = [str(x).replace("{repo}", str(repo)) for x in [*flags, *(a.get("args") or [])]]
-    return ["--", *model, *flags] if (model or flags) else []
-
-
 def agent_state(name: str) -> str:
     try:
         return find_key(herdr("agent", "get", name), "agent_status") or "?"
@@ -945,7 +1000,7 @@ def settle_startup(name: str, kind: str, timeout_s: int = 60) -> bool:
     return agent_state(name) in ("idle", "done")
 
 
-def start_agent(name: str, acfg: dict, pane_id: str, repo: Path, tries: int = 1) -> bool:
+def start_agent(name: str, agent: AgentConfig, pane_id: str, repo: Path, tries: int = 1) -> bool:
     """Start a role or orchestrator agent in a pane; True when it is up (or already reported as not ready yet)."""
     for attempt in range(tries):  # a new pane's shell may need a moment to reach its prompt
         try:
@@ -954,12 +1009,12 @@ def start_agent(name: str, acfg: dict, pane_id: str, repo: Path, tries: int = 1)
                 "start",
                 name,
                 "--kind",
-                acfg["kind"],
+                agent.kind,
                 "--pane",
                 pane_id,
                 "--timeout",
                 120_000,
-                *agent_cli_args(acfg, repo),
+                *agent.cli_args(repo),
             )
             return True
         except HerdrError as e:
@@ -973,7 +1028,7 @@ def start_agent(name: str, acfg: dict, pane_id: str, repo: Path, tries: int = 1)
 
 
 def prompt_or_start(
-    root: Path, wt: Path, role: str, slug: str, text: str, timeout_ms: int, acfg: dict
+    root: Path, wt: Path, role: str, slug: str, text: str, timeout_ms: int, agent: AgentConfig
 ) -> tuple[bool, str]:
     """Prompt the role agent, starting it in its own tab of the worktree's workspace if it does not exist yet.
     Returns (settled, note)."""
@@ -989,9 +1044,9 @@ def prompt_or_start(
                 pane_id = find_key(tab.get("root_pane", tab), "pane_id") or die(
                     f"tab create returned no pane_id: {tab}"
                 )
-                if not start_agent(name, acfg, pane_id, main_checkout(root)):
+                if not start_agent(name, agent, pane_id, main_checkout(root)):
                     raise
-                if not settle_startup(name, acfg["kind"]):
+                if not settle_startup(name, agent.kind):
                     return True, "blocked at startup"
                 continue
             if e.code == "timeout":
@@ -1162,7 +1217,7 @@ def run_tests(root: Path, cfg: Config) -> list[str]:
 
 def run_check(root: Path, slugs: list[str], tests: bool | None) -> list[str]:
     """tests: None = only if any feature is at review or later; True/False = force."""
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     errs, need_tests = [], bool(tests)
     for s in slugs:
         errs += check_feature(root, s, cfg.base_branch)
@@ -1462,7 +1517,7 @@ class Driver:
         prompt = role_prompt(role, self.slug, text)
         started = time.time()
         settled, note = prompt_or_start(
-            self.root, self.wt, role, self.slug, prompt, DRIVE_WAIT_MS, self.cfg.agents[role]
+            self.root, self.wt, role, self.slug, prompt, DRIVE_WAIT_MS, self.cfg.agent(role)
         )
         note = self.wait_role(role, settled, note, started)
         result, note, errs, state = evaluate(self.wt, role, self.slug, True, note, self.cfg)
@@ -1535,7 +1590,7 @@ class Doctor:
         self.check(shutil.which("herdr") is not None, "herdr in PATH", "https://herdr.dev/docs/install/")
         if shutil.which("uv") is None:
             self.notes.append("uv is not in PATH; run the launcher as `python3 harness/harness.py ...`")
-        cfg = load_cfg(self.root)
+        cfg = Config.load(self.root)
         self.check(True, "harness/config.json is valid")
         self.config(cfg)
         self.baseline(cfg)
@@ -1552,13 +1607,13 @@ class Doctor:
     def config(self, cfg: Config):
         self.check(ref_exists(f"refs/heads/{cfg.base_branch}", self.root), f"base branch '{cfg.base_branch}' exists")
         for role in ("orchestrator", *ROLES):
-            kind = cfg.agents[role]["kind"]
+            kind = cfg.agent(role).kind
             self.check(
                 shutil.which(kind) is not None,
                 f"{role}: '{kind}' CLI in PATH",
                 f"install it and log in, or change agents.{role}.kind",
             )
-        pats, bad = include_patterns(self.root, cfg)
+        pats, bad = WorktreeSetup(self.root, self.root, cfg).patterns()
         for pat in pats:
             if list(self.root.glob(pat)):
                 self.check(True, f"copy_files: {pat} is in the main checkout")
@@ -1566,8 +1621,8 @@ class Doctor:
                 self.notes.append(f"copy_files: {pat} is not in the main checkout, so new worktrees will not get it")
         for line in bad:
             self.check(False, f".worktreeinclude line rejected: {line}", "relative paths only, no '..'")
-        report = settings_report(self.root, cfg)
-        if APPLY_CMD in report:
+        report = ClaudeSettings(self.root, cfg.agent("orchestrator")).report()
+        if ClaudeSettings.APPLY_CMD in report:
             self.notes.append(report)
 
     def baseline(self, cfg: Config):
@@ -1588,8 +1643,8 @@ class Doctor:
         """`--models`: one tiny prompt per (CLI, model) pair, so a wrong model id fails here, not mid-feature."""
         seen: dict[tuple, bool] = {}
         for role in (*ROLES, "orchestrator"):
-            acfg = cfg.agents[role]
-            kind, model, cli = acfg["kind"], acfg.get("model") or "", CLIS.get(acfg["kind"])
+            agent = cfg.agent(role)
+            kind, model, cli = agent.kind, agent.model, agent.cli
             if not (cli and cli.probe) or not model:
                 self.notes.append(f"{role}: {kind} model {'not checked' if model else 'is the CLI default'}")
                 continue
@@ -1673,35 +1728,10 @@ class Doctor:
 
 
 # ----------------------------------------------------------------------------- commands
-def agent_lines(acfg: dict) -> list[str]:
-    """How `config` shows an agent's effort and permissions: our words, then what its CLI is given."""
-    kind, cli = acfg["kind"], CLIS.get(acfg["kind"])
-    effort, perm = acfg.get("effort", ""), acfg.get("permissions", "")
-    if not effort:
-        e = "effort       - (the CLI's default)"
-    elif not cli:
-        e = f"effort       {effort} (not translated for {kind}: put its flag in args)"
-    else:
-        native = cli.efforts[effort]
-        e = f"effort       {effort}" + (f" ({kind}: {native})" if native != effort else "")
-    if not perm:
-        p = "permissions  - (the CLI's default)"
-    elif not cli:
-        p = f"permissions  {perm} (not translated for {kind}: put its flags in args)"
-    else:
-        flags = " ".join(cli.permissions[perm]) or "no flag needed"
-        how = f"; {cli.guarded_by}" if perm == "guarded" and cli.guarded_by else ""
-        p = f"permissions  {perm}: {PERMISSION_WORDS[perm]}{how} ({flags})"
-    lines = [e, p]
-    if acfg.get("args"):
-        lines.append("args         " + " ".join(str(x) for x in acfg["args"]))
-    return lines
-
-
 def cmd_config(a):
     """The setup the next feature would run with, for the orchestrator to show the human before `start`."""
     root = main_checkout(repo_root())
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     print("harness/config.json")
     print(f"  base_branch        {cfg.base_branch}")
     print(f"  test_cmd           {cfg.test_cmd}")
@@ -1712,15 +1742,16 @@ def cmd_config(a):
     print(f"  max_role_minutes   {cfg.max_role_minutes or 'no limit'}")
     print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
     for role in (*ROLES, "orchestrator"):
-        acfg = cfg.agents[role]
-        kind, model = acfg["kind"], acfg.get("model") or "(default model)"
+        agent = cfg.agent(role)
+        kind, model = agent.kind, agent.model or "(default model)"
         missing = "   <- not in PATH" if not shutil.which(kind) else ""
         note = "   (only used by start --detach)" if role == "orchestrator" else ""
         print(f"  {role:<18} {kind:<7} {model}{missing}{note}")
-        for line in agent_lines(acfg):
+        for line in agent.describe():
             print(f"  {'':<18} {line}")
     print("  effort: " + " < ".join(EFFORT_LEVELS) + "   permissions: " + ", ".join(PERMISSION_LEVELS))
-    print(write_local_settings(root, cfg) if a.apply else settings_report(root, cfg))
+    settings = ClaudeSettings(root, cfg.agent("orchestrator"))
+    print(settings.apply() if a.apply else settings.report())
     print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
     return 0
 
@@ -1731,7 +1762,7 @@ def role_working(role: str, slug: str) -> bool:
 
 def cmd_status(a):
     root = repo_root()
-    gates = load_cfg(root).gates
+    gates = Config.load(root).gates
     feats = features_everywhere(root)
     if not feats:
         print('no features yet. start one: harness.py start <slug> "intent"')
@@ -1835,28 +1866,17 @@ def seed_feature(wt: Path, slug: str, intent: str):
     git("commit", "-q", "-m", f"{slug}: new feature", cwd=wt)
 
 
-def prepare_worktree(root: Path, wt: Path, cfg: Config):
-    """Gitignored files the project needs, then setup_cmd."""
-    pats, bad = include_patterns(root, cfg)
-    if pats or bad:
-        report_line = copy_ignored(root, wt, pats) if pats else "nothing listed"
-        print("copy_files:", report_line + (f"; rejected .worktreeinclude lines: {', '.join(bad)}" if bad else ""))
-    if cfg.setup_cmd:
-        code, out = shell(cfg.setup_cmd, wt)
-        print("setup_cmd:", "ok" if code == 0 else f"FAILED (exit {code}); fix it in the worktree\n{out[-800:]}")
-
-
 def start_detached(root: Path, cfg: Config, slug: str, res: dict):
     """A dedicated orchestrator agent in the worktree's root pane, prompted with its role."""
-    acfg = cfg.agents["orchestrator"]
+    agent = cfg.agent("orchestrator")
     pane_id = res["root_pane"]["pane_id"]
     tab_id = find_key(res.get("tab", {}), "tab_id")
     if tab_id:
         with contextlib.suppress(HerdrError):
             herdr("tab", "rename", tab_id, "orchestrator")
     text = f"Read harness/roles/orchestrator.md and follow it for harness/features/{slug}/."
-    started = start_agent(slug, acfg, pane_id, root, tries=3)
-    if started and not settle_startup(slug, acfg["kind"]):
+    started = start_agent(slug, agent, pane_id, root, tries=3)
+    if started and not settle_startup(slug, agent.kind):
         print(
             "warning: the orchestrator is blocked on a dialog; look at it: "
             f"herdr agent read {slug} --source visible --lines 40"
@@ -1875,12 +1895,12 @@ def start_detached(root: Path, cfg: Config, slug: str, res: dict):
 
 def cmd_start(a):
     root = repo_root()
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     start_preconditions(root, cfg, a.slug)
     res = create_worktree(root, a.slug, cfg.base_branch, a.trust)
     wt = Path(res["worktree"]["path"])
     seed_feature(wt, a.slug, a.intent)
-    prepare_worktree(root, wt, cfg)
+    WorktreeSetup(root, wt, cfg).run()
     sidebar(wt, state_text("pending", "", cfg.gates))
     ws_id = res["workspace"]["workspace_id"]
     print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")
@@ -1893,7 +1913,7 @@ def cmd_start(a):
 
 def cmd_run(a):
     root = repo_root()
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     f = live_worktree(root, a.slug)
     pid = driver_running(f.wt)
     if pid:
@@ -1906,14 +1926,14 @@ def cmd_run(a):
         die(err)
     sidebar(f.wt, state_text(f.status, f.verdict, cfg.gates, running=a.role))
     settled, note = prompt_or_start(
-        root, f.wt, a.role, a.slug, role_prompt(a.role, a.slug, a.msg), a.timeout, cfg.agents[a.role]
+        root, f.wt, a.role, a.slug, role_prompt(a.role, a.slug, a.msg), a.timeout, cfg.agent(a.role)
     )
     return report(f.wt, a.role, a.slug, settled, note, cfg)
 
 
 def cmd_wait(a):
     root = repo_root()
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     wt = live_worktree(root, a.slug).wt
     name = agent_name(a.role, a.slug)
     settled, note = wait_agent(name, a.timeout)
@@ -1924,7 +1944,7 @@ def cmd_wait(a):
 
 def cmd_approve(a):
     root = repo_root()
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     f = locate(root, a.slug)
     if f.status != "spec_ready":
         die(f"'{a.slug}' is '{f.status or '(none)'}', expected spec_ready")
@@ -1943,7 +1963,7 @@ def cmd_approve(a):
 
 def cmd_drive(a):
     root = repo_root()
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     f = live_worktree(root, a.slug)
     pid = driver_running(f.wt)
     if pid:
@@ -2024,7 +2044,7 @@ def remove_worktree(root: Path, wt: Path, slug: str, cfg: Config):
 
 def cmd_merge(a):
     root = repo_root()
-    cfg = load_cfg(root)
+    cfg = Config.load(root)
     try:
         f = merge_preconditions(root, cfg, a.slug)
         land(root, f.wt, a.slug, cfg.base_branch)
