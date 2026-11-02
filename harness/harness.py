@@ -303,7 +303,7 @@ class AgentConfig:
     its Cli (when the launcher knows the CLI) turns them into flags."""
 
     role: str
-    kind: str
+    harness: str
     model: str = ""
     effort: str = ""
     permissions: str = ""
@@ -313,10 +313,10 @@ class AgentConfig:
     def parse(cls, role: str, raw, where: str) -> AgentConfig:
         """The entry after checking it; dies naming the first problem. The flags `effort` and `permissions` translate
         to are never written by hand in `args`."""
-        if not isinstance(raw, dict) or not raw.get("kind"):
-            die(f"{where}.kind is required")
-        kind, effort, perm = raw["kind"], raw.get("effort", ""), raw.get("permissions", "")
-        cli = CLIS.get(kind)
+        if not isinstance(raw, dict) or not raw.get("harness"):
+            die(f"{where}.harness is required")
+        name, effort, perm = raw["harness"], raw.get("effort", ""), raw.get("permissions", "")
+        cli = CLIS.get(name)
         if not isinstance(effort, str) or (effort and effort not in EFFORT_LEVELS):
             hint = f" ('{effort}' is the provider's word; here it is '{PROVIDER_EFFORTS[effort]}')" if (
                 effort in PROVIDER_EFFORTS
@@ -328,18 +328,18 @@ class AgentConfig:
             why = f"'{perm}' would stop it at its first prompt" if perm else "it is required"
             die(f"{where}.permissions: {why}; a role agent runs unattended: use {' or '.join(ROLE_PERMISSIONS)}")
         if cli and perm and perm not in cli.permissions:
-            die(f"{where}.permissions '{perm}' is not available for {kind} (it has: {', '.join(cli.permissions)})")
+            die(f"{where}.permissions '{perm}' is not available for {name} (it has: {', '.join(cli.permissions)})")
         args = raw.get("args") or []
         if not isinstance(args, list):
             die(f"{where}.args must be a list of strings")
         own = [a for a in args if str(a).startswith(PERMISSION_FLAGS)]
         if cli and perm and own:
             die(f"{where}.args sets permissions itself ({own[0]}); `permissions: {perm}` already does, drop the flag")
-        return cls(role, kind, raw.get("model") or "", effort, perm, tuple(str(a) for a in args))
+        return cls(role, name, raw.get("model") or "", effort, perm, tuple(str(a) for a in args))
 
     @property
     def cli(self) -> Cli | None:
-        return CLIS.get(self.kind)
+        return CLIS.get(self.harness)
 
     def cli_args(self, repo: Path) -> list:
         """The CLI flags after `--`: model, effort, permissions (translated by its Cli; a CLI not in CLIS gets
@@ -371,14 +371,14 @@ class AgentConfig:
         if not effort:
             e = "effort       - (the CLI's default)"
         elif not cli:
-            e = f"effort       {effort} (not translated for {self.kind}: put its flag in args)"
+            e = f"effort       {effort} (not translated for {self.harness}: put its flag in args)"
         else:
             native = cli.efforts[effort]
-            e = f"effort       {effort}" + (f" ({self.kind}: {native})" if native != effort else "")
+            e = f"effort       {effort}" + (f" ({self.harness}: {native})" if native != effort else "")
         if not perm:
             p = "permissions  - (the CLI's default)"
         elif not cli:
-            p = f"permissions  {perm} (not translated for {self.kind}: put its flags in args)"
+            p = f"permissions  {perm} (not translated for {self.harness}: put its flags in args)"
         else:
             flags = " ".join(cli.permissions[perm]) or "no flag needed"
             how = f"; {cli.guarded_by}" if perm == "guarded" and cli.guarded_by else ""
@@ -453,10 +453,17 @@ class Config:
 class ClaudeSettings:
     """.claude/settings.local.json (per machine, gitignored) against agents.orchestrator, so the Claude the human
     opens in this repo starts with that model and permission mode. `report` only reads: raising the permissions of
-    the next session is the human's call (`config --apply` runs `apply`), never an agent's."""
+    the next session is the human's call, never an agent's. `config --apply` runs `apply`, and so does `doctor`
+    when the human runs it in a terminal; inside a Claude Code session (CLAUDECODE set) `doctor` only reports."""
 
     NOT_CLAUDE = "orchestrator is not Claude Code: .claude/settings.local.json left alone"
     APPLY_CMD = "uv run harness/harness.py config --apply"
+    DOCTOR_CMD = "uv run harness/harness.py doctor"
+
+    @staticmethod
+    def in_session() -> bool:
+        """Is this process running inside a Claude Code session (an agent's shell, not the human's terminal)?"""
+        return bool(os.environ.get("CLAUDECODE"))
 
     def __init__(self, root: Path, orchestrator: AgentConfig):
         self.path = root / ".claude" / "settings.local.json"
@@ -465,7 +472,7 @@ class ClaudeSettings:
     def compare(self) -> tuple[dict, dict, str] | None:
         """(current, wanted, summary); other keys in the file are kept. None when the orchestrator is not Claude
         Code."""
-        if self.orchestrator.kind != "claude":
+        if self.orchestrator.harness != "claude":
             return None
         want = self.orchestrator.claude_settings()
         try:
@@ -494,7 +501,7 @@ class ClaudeSettings:
             return f"Claude Code in this repo: {what} (in step with .claude/settings.local.json)"
         return (
             f"Claude Code in this repo should run with {what}, which .claude/settings.local.json does not say yet; "
-            f"to apply, run yourself: {self.APPLY_CMD}, then restart Claude Code"
+            f"to apply, run yourself in a terminal: {self.DOCTOR_CMD} (or {self.APPLY_CMD}), then restart Claude Code"
         )
 
     def apply(self) -> str:
@@ -1123,7 +1130,7 @@ class Herdr:
         """Start a role or orchestrator agent in a pane; True when it is up (or already reported as not ready yet)."""
         for attempt in range(tries):  # a new pane's shell may need a moment to reach its prompt
             try:
-                args = ("--kind", agent.kind, "--pane", pane_id, "--timeout", 120_000, *agent.cli_args(repo))
+                args = ("--kind", agent.harness, "--pane", pane_id, "--timeout", 120_000, *agent.cli_args(repo))
                 self.call("agent", "start", name, *args)
                 return True
             except HerdrError as e:
@@ -1795,11 +1802,11 @@ class Doctor:
             Git(self.root).ref_exists(f"refs/heads/{cfg.base_branch}"), f"base branch '{cfg.base_branch}' exists"
         )
         for role in ("orchestrator", *ROLES):
-            kind = cfg.agent(role).kind
+            kind = cfg.agent(role).harness
             self.check(
                 shutil.which(kind) is not None,
                 f"{role}: '{kind}' CLI in PATH",
-                f"install it and log in, or change agents.{role}.kind",
+                f"install it and log in, or change agents.{role}.harness",
             )
         pats, bad = WorktreeSetup(self.root, self.root, cfg).patterns()
         for pat in pats:
@@ -1809,9 +1816,13 @@ class Doctor:
                 self.notes.append(f"copy_files: {pat} is not in the main checkout, so new worktrees will not get it")
         for line in bad:
             self.check(False, f".worktreeinclude line rejected: {line}", "relative paths only, no '..'")
-        report = ClaudeSettings(self.root, cfg.agent("orchestrator")).report()
-        if ClaudeSettings.APPLY_CMD in report:
-            self.notes.append(report)
+        settings = ClaudeSettings(self.root, cfg.agent("orchestrator"))
+        if ClaudeSettings.in_session():  # an agent: it may not raise its own permissions
+            report = settings.report()
+            if ClaudeSettings.APPLY_CMD in report:
+                self.notes.append(report)
+        elif settings.compare() is not None:
+            self.check(True, settings.apply())
 
     def baseline(self, cfg: Config):
         """test_cmd on the main checkout: a red baseline would be blamed on the first feature's implementer."""
@@ -1832,7 +1843,7 @@ class Doctor:
         seen: dict[tuple, bool] = {}
         for role in (*ROLES, "orchestrator"):
             agent = cfg.agent(role)
-            kind, model, cli = agent.kind, agent.model, agent.cli
+            kind, model, cli = agent.harness, agent.model, agent.cli
             if not (cli and cli.probe) or not model:
                 self.notes.append(f"{role}: {kind} model {'not checked' if model else 'is the CLI default'}")
                 continue
@@ -1931,7 +1942,7 @@ def cmd_config(a):
     print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
     for role in (*ROLES, "orchestrator"):
         agent = cfg.agent(role)
-        kind, model = agent.kind, agent.model or "(default model)"
+        kind, model = agent.harness, agent.model or "(default model)"
         missing = "   <- not in PATH" if not shutil.which(kind) else ""
         note = "   (only used by start --detach)" if role == "orchestrator" else ""
         print(f"  {role:<18} {kind:<7} {model}{missing}{note}")

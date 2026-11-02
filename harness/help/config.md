@@ -19,7 +19,7 @@ has no model and no cost.
 | `max_review_rounds` | no | integer, default `3`, `0` = no limit | After this many `CHANGES_REQUESTED` reviews the feature is set `blocked` for the human. |
 | `max_role_minutes` | no | integer, default `180`, `0` = no limit | When one role run (prompt to settled) takes longer, the driver stops and prompts the orchestrator ("still working after N min"). The agent keeps running; you decide whether to wait (`drive <slug> --tab` again) or stop it. |
 | `gates.approve`, `gates.merge` | no | `human` or `auto`; a missing key means `human` | `human`: the driver stops and prompts the orchestrator. `auto`: the driver runs the command itself. The shipped file sets both to `auto`. |
-| `agents.<role>` | yes, all four | object, below | Which CLI and model run `spec_author`, `implementer`, `reviewer`, and `orchestrator`. The orchestrator entry starts the agent of `start --detach`, and when its kind is `claude` it also sets what the Claude you open in this repo starts with: `config --apply`, run by you, writes its `model` and the Claude Code mode of its `permissions` (ask → default, edits → acceptEdits, guarded → auto, full → bypassPermissions) to `.claude/settings.local.json`, read at the next session start, with two rules added to any of yours: allow `uv run harness/harness.py`, deny `config --apply` (only you raise its permissions). Plain `config` only says whether that file matches. |
+| `agents.<role>` | yes, all four | object, below | Which CLI and model run `spec_author`, `implementer`, `reviewer`, and `orchestrator`. The orchestrator entry starts the agent of `start --detach`, and when its harness is `claude` it also sets what the Claude you open in this repo starts with: `doctor` run in your terminal (or `config --apply`) writes its `model` and the Claude Code mode of its `permissions` (ask → default, edits → acceptEdits, guarded → auto, full → bypassPermissions) to `.claude/settings.local.json`, read at the next session start, with two rules added to any of yours: allow `uv run harness/harness.py`, deny `config --apply` (only you raise its permissions). Plain `config`, and `doctor` run by an agent inside Claude Code, only say whether that file matches. |
 
 ## `agents.<role>`
 
@@ -28,7 +28,7 @@ translates them for each CLI. `config` shows both.
 
 | key | required | values | what it does |
 |---|---|---|---|
-| `kind` | yes | a herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
+| `harness` | yes | the agent CLI, by its herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
 | `model` | no | the provider's model id, or `""` | Passed as `--model`; empty = the CLI's default. Kept as the provider names it, so you always see what you pay for; `doctor --models` checks it. |
 | `effort` | no | `low`, `medium`, `high`, `extra`, `max`, or `""` | How hard the model thinks, translated per CLI (table below). Empty = the CLI's default. |
 | `permissions` | yes for the three roles; no for the orchestrator | `ask`, `edits`, `guarded`, `full` | What the agent may do without asking (table below). Roles run unattended, so they must be `guarded` or `full`. A missing orchestrator value = the CLI's default. |
@@ -66,10 +66,10 @@ folder, bypass-permissions warning) itself; any other dialog is reported.
 
 Ready-to-copy entries:
 ```json
-{ "kind": "claude", "model": "claude-sonnet-5-5", "effort": "high",  "permissions": "full" }
-{ "kind": "claude", "model": "claude-opus-5-5",   "effort": "extra", "permissions": "guarded" }
-{ "kind": "codex",  "model": "",                  "effort": "extra", "permissions": "guarded" }
-{ "kind": "pi",     "model": "anthropic/claude-sonnet-5-5", "effort": "medium", "permissions": "full" }
+{ "harness": "claude", "model": "claude-sonnet-5-5", "effort": "high",  "permissions": "full" }
+{ "harness": "claude", "model": "claude-opus-5-5",   "effort": "extra", "permissions": "guarded" }
+{ "harness": "codex",  "model": "",                  "effort": "extra", "permissions": "guarded" }
+{ "harness": "pi",     "model": "anthropic/claude-sonnet-5-5", "effort": "medium", "permissions": "full" }
 ```
 
 ## herdr's sidebar

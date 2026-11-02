@@ -21,8 +21,9 @@
 - You are meant to run as `agents.orchestrator` in `harness/config.json` says (model, permissions).
   Only the human writes that into `.claude/settings.local.json`, which Claude Code reads when a session
   starts: when `config` says the file does not match yet, or you are being asked for permissions you
-  should not be asked for, ask them to run `! uv run harness/harness.py config --apply` and restart
-  Claude Code in this repo. Never run `config --apply` yourself.
+  should not be asked for, ask them to run `uv run harness/harness.py doctor` in their own terminal (it
+  applies the settings there; inside your session it only reports) and restart Claude Code in this repo.
+  Never run `config --apply` yourself.
 
 ## 4. Where things are
 - Rules, lifecycle, what `check` enforces: `harness/docs/sdd.md`
