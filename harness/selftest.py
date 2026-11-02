@@ -930,6 +930,41 @@ class DriverTests(Case):
         f = h.locate(self.r.root, "feat")
         return self.output(h.Driver(self.r.root, self.r.cfg(), f, msg, notify).run)
 
+    def stuck_role(self, max_minutes, settle_after):
+        """A spec author whose prompt never settles by itself; wait_agent settles after `settle_after` waits; each
+        wait moves the clock 10 minutes."""
+        self.r.write_cfg(max_role_minutes=max_minutes)
+        clock, waits = [0.0], [0]
+
+        def wait(name, ms):
+            clock[0] += 600
+            waits[0] += 1
+            return waits[0] >= settle_after, ""
+
+        def prompt(root, wt, role, slug, text, timeout_ms, acfg):
+            self.fake_prompt(root, wt, role, slug, text, timeout_ms, acfg)
+            return False, ""
+
+        self.stub("wait_agent", wait)
+        self.stub("prompt_or_start", prompt)
+        self.stub("time", types.SimpleNamespace(time=lambda: clock[0], sleep=lambda s: None))
+        self.actions["spec_author"] = [self.spec_author]
+        return waits
+
+    def test_a_role_past_max_role_minutes_stops_the_driver(self):
+        waits = self.stuck_role(max_minutes=30, settle_after=99)
+        code, _ = self.drive()
+        self.assertEqual(code, h.EXIT_ATTENTION)
+        self.assertIn("needs you: spec_author still working after 30 min (max_role_minutes 30)", self.notes[-1])
+        self.assertEqual(waits[0], 3)
+
+    def test_no_role_limit_waits_until_the_role_settles(self):
+        waits = self.stuck_role(max_minutes=0, settle_after=20)
+        code, _ = self.drive()  # human approve gate: stops at spec_ready once the spec author settles
+        self.assertEqual(code, h.EXIT_DONE)
+        self.assertEqual(waits[0], 20)
+        self.assertIn("spec ready, needs you", self.notes[-1])
+
     def test_auto_gates_run_to_the_merge(self):
         self.r.write_cfg(gates={"approve": "auto", "merge": "auto"})
         self.actions["spec_author"] = [self.spec_author]

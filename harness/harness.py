@@ -62,6 +62,7 @@ TEMPLATE_PLACEHOLDERS = ("<trigger>", "<response>", "<unwanted condition>", "<ta
 EXIT_DONE, EXIT_ERROR, EXIT_ATTENTION, EXIT_WORKING = 0, 1, 2, 3
 DEFAULT_TIMEOUT_MS = 100_000  # below Claude Code's 120 s default shell timeout
 DRIVE_WAIT_MS = 300_000  # the driver waits for a role in slices of this length
+DEFAULT_ROLE_MINUTES = 180  # the driver stops for a human when one role run takes longer (max_role_minutes)
 FIX_TRIES = 3  # how often the driver sends a failed check back to the same role before stopping
 REVIEW_REF = "refs/harness/{slug}/review-start"  # set by `run reviewer`, dropped by `run implementer` and `merge`
 SYNC_MSG = (
@@ -192,6 +193,7 @@ class Config:
     teardown_cmd: str
     copy_files: tuple
     max_review_rounds: int
+    max_role_minutes: int
     gates: dict  # "approve" / "merge" -> "human" | "auto"
     agents: dict  # role -> {"kind", "model", "args"}
 
@@ -223,9 +225,10 @@ def validate_cfg(raw: dict, p: Path) -> dict:
     copy_files = raw.get("copy_files", [])
     if not isinstance(copy_files, list) or not all(valid_pattern(x) for x in copy_files):
         die(f"{p}: copy_files must be a list of paths or globs relative to the repo root")
-    rounds = raw.get("max_review_rounds", 3)
-    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 0:
-        die(f"{p}: max_review_rounds must be an integer >= 0 (0 = no limit)")
+    for key, default in (("max_review_rounds", 3), ("max_role_minutes", DEFAULT_ROLE_MINUTES)):
+        n = raw.get(key, default)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            die(f"{p}: {key} must be an integer >= 0 (0 = no limit)")
     for key in ("setup_cmd", "teardown_cmd"):
         if not isinstance(raw.get(key, ""), str):
             die(f'{p}: {key} must be a shell command or ""')
@@ -249,6 +252,7 @@ def load_cfg(root: Path) -> Config:
         teardown_cmd=raw.get("teardown_cmd", ""),
         copy_files=tuple(raw.get("copy_files", [])),
         max_review_rounds=raw.get("max_review_rounds", 3),
+        max_role_minutes=raw.get("max_role_minutes", DEFAULT_ROLE_MINUTES),
         gates=gates,
         agents=raw["agents"],
     )
@@ -1241,9 +1245,7 @@ class Driver:
         name = agent_name(role, self.slug)
         if agent_state(name) == "working":  # left working by an earlier driver or a human: let it finish first
             self.log(f"{name} is still working; waiting")
-            settled = False
-            while not settled:
-                settled, _ = wait_agent(name, DRIVE_WAIT_MS)
+            self.wait_role(role, False, "", time.time())
             self.msg = text
             return
         st, vd = feature_state(self.fdir)
@@ -1321,16 +1323,31 @@ class Driver:
             self.stop(f"blocked, needs you: check keeps failing after {FIX_TRIES} fixes", EXIT_ATTENTION)
         return "implementer", "check --tests fails on the branch:\n" + "\n".join(errs)[-1500:] + "\nFix it, commit."
 
+    def wait_role(self, role: str, settled: bool, note: str, started: float) -> str:
+        """Wait until the role agent settles; returns its note. Past max_role_minutes since `started`, stop for the
+        human instead (the agent is left running: whether to stop it is theirs to decide)."""
+        name, limit = agent_name(role, self.slug), self.cfg.max_role_minutes
+        while not settled:
+            minutes = int((time.time() - started) // 60)
+            if limit and minutes >= limit:
+                self.stop(
+                    f"needs you: {role} still working after {minutes} min (max_role_minutes {limit}); "
+                    f"inspect: herdr agent read {name} --source recent-unwrapped --lines 120",
+                    EXIT_ATTENTION,
+                )
+            settled, note = wait_agent(name, DRIVE_WAIT_MS)
+        return note
+
     def run_role(self, role: str, text: str, st: str, vd: str):
         name = agent_name(role, self.slug)
         self.log(f"run {role}" + (f": {' '.join(text.split())[:120]}" if text else ""))
         sidebar(self.wt, state_text(st, vd, self.gates, running=role))
         prompt = role_prompt(role, self.slug, text)
+        started = time.time()
         settled, note = prompt_or_start(
             self.root, self.wt, role, self.slug, prompt, DRIVE_WAIT_MS, self.cfg.agents[role]
         )
-        while not settled:
-            settled, note = wait_agent(name, DRIVE_WAIT_MS)
+        note = self.wait_role(role, settled, note, started)
         result, note, errs, state = evaluate(self.wt, role, self.slug, True, note, self.cfg)
         self.log(f"{name}: state={state} -> {result}" + (f" [{note}]" if note else ""))
         if errs:
@@ -1519,6 +1536,7 @@ def cmd_config(a):
     print(f"  teardown_cmd       {cfg.teardown_cmd or '-'}")
     print(f"  copy_files         {', '.join(cfg.copy_files) or '-'}")
     print(f"  max_review_rounds  {cfg.max_review_rounds or 'no limit'}")
+    print(f"  max_role_minutes   {cfg.max_role_minutes or 'no limit'}")
     print(f"  gates              approve: {cfg.gates['approve']}   merge: {cfg.gates['merge']}")
     for role in (*ROLES, "orchestrator"):
         acfg = cfg.agents[role]

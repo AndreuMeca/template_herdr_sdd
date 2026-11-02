@@ -118,7 +118,8 @@ come from the main checkout's `config.json`, so a branch cannot change what it i
   merge gate a worktree with uncommitted changes stops the driver ("needs you") instead of merging; after
   an `auto` merge, `merge` itself prompts that pane with the outcome (merged at `<sha>`, or why it failed).
 - While a driver runs a feature, `run` and `merge` refuse it; while a role agent is still working,
-  `run` refuses to prompt it and the driver waits.
+  `run` refuses to prompt it and the driver waits, up to `max_role_minutes` per role run; past that it
+  stops for the human and leaves the agent running.
 
 ## 9. Trust model
 

@@ -8,6 +8,7 @@
   ],
   "teardown_cmd": "",
   "max_review_rounds": 3,
+  "max_role_minutes": 180,
   "gates": {
     "approve": "auto",
     "merge": "auto"
