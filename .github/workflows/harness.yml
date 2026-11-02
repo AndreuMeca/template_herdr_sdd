@@ -1,0 +1,31 @@
+# The launcher's own tests and lint. Runs only when the harness changes, so a project's own CI stays its own.
+name: harness
+
+on:
+  push:
+    paths: ["harness/**", ".github/workflows/harness.yml"]
+  pull_request:
+    paths: ["harness/**", ".github/workflows/harness.yml"]
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }  # the oldest Python harness/ruff.toml targets
+          - { os: macos-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      # uv installs any CPython on any runner image (setup-python has no 3.9 for the newest Ubuntu)
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --no-project --python ${{ matrix.python }} python harness/selftest.py -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.17.3 check --config harness/ruff.toml harness/
+      - run: uvx ruff@0.17.3 format --check --config harness/ruff.toml harness/

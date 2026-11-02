@@ -18,11 +18,15 @@ every agent reads; the rest of the repo is your project.
 3. Edit `harness/config.json`: agent per role, gates, commands, files to copy into worktrees. Every
    key is explained in `harness/help/config.md`.
 4. Add your code outside `harness/`, commit, open the repo in herdr, start your agent and ask for a
-   feature. `uv run harness/harness.py doctor` checks tools and config. The Claude you open in this
+   feature. `uv run harness/harness.py doctor` checks tools and config and runs `test_cmd` on the main
+   checkout: get it all green before the first feature, or the first implementer gets blamed for a red
+   baseline (`--no-tests` skips that run). `doctor --models` also sends each Claude Code and Codex role
+   one tiny prompt with its model, so a wrong model id fails there (a few tokens). The Claude you open in this
    repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `config
    --apply` writes them to `.claude/settings.local.json` (per machine, not committed), so with
-   `--dangerously-skip-permissions` in its args the orchestrator never stops to ask (accept Claude
-   Code's one-time warning). Run `uv run harness/harness.py config --apply` once after cloning and after
+   `"permissions": "full"` the orchestrator never stops to ask (accept Claude Code's one-time warning).
+   Effort and permissions use the file's own words for every CLI (`low`…`max`, `ask`/`edits`/`guarded`/
+   `full`); `harness/help/config.md` shows what each CLI is given. Run `uv run harness/harness.py config --apply` once after cloning and after
    every change to `agents.orchestrator`, then start Claude. Plain `config` only shows the setup, and the
    agent is denied `--apply` (`.claude/settings.json`), so it cannot raise its own permissions.
 
@@ -48,7 +52,8 @@ feature's state shows in herdr's sidebar once you add one line to its config (`h
 AGENTS.md                      the map (read natively by Claude Code, Codex, pi)
 harness/
   harness.py                   the launcher: --help lists every command
-  selftest.py                  the launcher's own tests: python3 harness/selftest.py (ruff.toml: its lint settings)
+  selftest.py                  the launcher's own tests: python3 harness/selftest.py (ruff.toml: its lint settings);
+                               .github/workflows/harness.yml runs both when harness/ changes
   config.json                  agent per role, gates, commands, files copied into worktrees
   help/config.md               every key of config.json
   docs/sdd.md                  the rules: lifecycle, file formats, EARS, traceability, what check enforces

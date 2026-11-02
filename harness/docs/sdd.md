@@ -50,6 +50,8 @@ the current code.
 - Each active R has exactly one `SHALL` and one pattern:
   `THE SYSTEM SHALL <response>.` · `WHEN <trigger>, THE SYSTEM SHALL ...` · `WHILE <state>, THE SYSTEM SHALL ...` ·
   `WHERE <feature is enabled>, THE SYSTEM SHALL ...` · `IF <condition>, THEN THE SYSTEM SHALL ...`
+  `THE SYSTEM` may name the component instead (`THE API SHALL`), in capitals like the keywords; `WHILE`,
+  `WHEN` and `WHERE` clauses may combine before it (`WHILE offline, WHEN a write arrives, THE SYSTEM SHALL ...`).
 - Observable behaviour with concrete values (`returns 404`, `within 2 s`), *what* not *how*, no soft
   verbs (`should`, `may`, `try to`).
 - `## Open questions` is empty at `spec_ready`; a question the intent and the code cannot answer is
@@ -89,7 +91,7 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 | # | rule | from status |
 |---|---|---|
 | 1 | `status` in `spec.md` is one of the lifecycle table | always |
-| 2 | at least one active R, ids unique, each with `SHALL` and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
+| 2 | at least one active R, ids unique, each with exactly one `SHALL` in an EARS pattern (§3) and no template placeholder (`<trigger>`, `<response>`, ...); `## Open questions` empty | `spec_ready` |
 | 3 | every task cites an existing R and keeps no template placeholder (`<task>`); every active R is cited by a task | `spec_ready` |
 | 4 | every active R has its `<slug>:R<n>` token outside `harness/` (`git grep --untracked`) | `review` |
 | 5 | every task ticked and `log.md` exists | `review` |
@@ -116,17 +118,18 @@ come from the main checkout's `config.json`, so a branch cannot change what it i
   merge gate a worktree with uncommitted changes stops the driver ("needs you") instead of merging; after
   an `auto` merge, `merge` itself prompts that pane with the outcome (merged at `<sha>`, or why it failed).
 - While a driver runs a feature, `run` and `merge` refuse it; while a role agent is still working,
-  `run` refuses to prompt it and the driver waits.
+  `run` refuses to prompt it and the driver waits, up to `max_role_minutes` per role run; past that it
+  stops for the human and leaves the agent running.
 
 ## 9. Trust model
 
 The launcher and `check` keep cooperative agents on the lifecycle; they catch mistakes, they are not a
-security boundary. An agent started with a permission-bypass flag (`--dangerously-skip-permissions`,
+security boundary. An agent with `permissions: full` (Claude Code `--dangerously-skip-permissions`, Codex
 `--dangerously-bypass-approvals-and-sandbox`) can run any command as you: move a ref such as
 `refs/harness/<slug>/review-start` (which defeats rule 10), edit the main checkout's `config.json` or
 `harness/`, read what `copy_files` brought in (`.env`), or push. What holds against honest mistakes: checks
 and commands come from the main checkout, `merge` is local, a push is always yours, and only the human
 applies the orchestrator's own permissions (`config --apply`). With both gates `auto`, nobody reads the spec
-or the code before it lands on the base branch; that is a per-project choice in `config.json`. For real
-isolation use sandboxed modes (Codex `--sandbox workspace-write --add-dir {repo}/.git`, Claude Code's
-sandbox) or a disposable machine or container.
+or the code before it lands on the base branch; that is a per-project choice in `config.json`. For more
+containment use `permissions: guarded` (Codex: a sandbox that writes only in the worktree; Claude Code: auto
+mode's classifier, which limits risky actions but is not a sandbox), or a disposable machine or container.

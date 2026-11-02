@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The launcher's own tests: python3 harness/selftest.py [-v].
 
-Stdlib unittest, one temporary git repo (main checkout + one feature worktree) per test, no herdr: everything
-that talks to herdr is stubbed. Not named test_*.py on purpose, so a project's own pytest run does not collect it.
+Stdlib unittest, one temporary git repo (main checkout + one feature worktree) per test, no herdr: the launcher
+talks to herdr only through its HERDR adapter, whose methods the tests replace (`stub_herdr`), or a stand-in
+`herdr` binary on PATH answers. Not named test_*.py on purpose, so a project's own pytest run does not collect it.
 """
 
 from __future__ import annotations
@@ -51,7 +52,10 @@ src/m.py
 ## Open questions
 {questions}
 """
-AGENTS = {r: {"kind": "claude"} for r in ("orchestrator", "spec_author", "implementer", "reviewer")}
+AGENTS = {
+    "orchestrator": {"kind": "claude"},
+    **{r: {"kind": "claude", "permissions": "full"} for r in ("spec_author", "implementer", "reviewer")},
+}
 
 
 class Repo:
@@ -114,13 +118,35 @@ class Repo:
         self.git("update-ref", "refs/harness/feat/review-start", rev, cwd=self.wt)
 
     def check(self):
-        return h.check_feature(self.wt, "feat", "main")
+        return h.Checker(self.wt, "feat", "main").errors()
 
     def cfg(self):
-        return h.load_cfg(self.wt)
+        return h.Config.load(self.wt)
 
     def close(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+def agent(raw: dict, role: str = "orchestrator"):
+    """An AgentConfig parsed the way the launcher parses config.json (the orchestrator needs no permissions)."""
+    return h.AgentConfig.parse(role, raw, "test")
+
+
+def fake_driver(case) -> int:
+    """pid of a live process whose command line reads like a driver's; killed when the test ends."""
+    code = "import time; time.sleep(60)"
+    p = subprocess.Popen([sys.executable, "-c", code, "harness.py", "drive", "feat"])
+    case.addCleanup(p.wait)
+    case.addCleanup(p.kill)
+    return p.pid
+
+
+def ps_works() -> bool:
+    """`ps` can be run here (a sandbox may block it; the launcher then trusts a live pid)."""
+    try:
+        return subprocess.run(["ps", "-p", str(os.getpid())], capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def no_herdr(*args):
@@ -228,14 +254,19 @@ class Case(unittest.TestCase):
         if self.fake_herdr:
             self.install_fake_herdr()
         else:
-            self.stub("herdr", no_herdr)
-            self.stub("agent_state", lambda name: "idle")
-            self.stub("sidebar", lambda *a, **k: None)
+            self.stub_herdr("call", no_herdr)
+            self.stub_herdr("state", lambda name: "idle")
+            self.stub_herdr("sidebar", lambda *a, **k: None)
 
     def stub(self, name, value):
         orig = getattr(h, name)
         setattr(h, name, value)
         self.addCleanup(setattr, h, name, orig)
+
+    def stub_herdr(self, method, value):
+        """Replace one method of the launcher's HERDR adapter for this test."""
+        setattr(h.HERDR, method, value)
+        self.addCleanup(vars(h.HERDR).pop, method, None)
 
     def setenv(self, name, value):
         old = os.environ.get(name)
@@ -293,21 +324,21 @@ class PureFunctions(unittest.TestCase):
     def test_frontmatter(self):
         p = Path(tempfile.mkdtemp()) / "spec.md"
         p.write_text("---\nstatus: pending\n---\n# T\n")
-        self.assertEqual(h.fm_read(p), {"status": "pending"})
-        h.fm_set(p, "status", "review")
-        h.fm_set(p, "extra", "1")
-        self.assertEqual(h.fm_read(p), {"status": "review", "extra": "1"})
+        self.assertEqual(h.Frontmatter.read(p), {"status": "pending"})
+        h.Frontmatter.set(p, "status", "review")
+        h.Frontmatter.set(p, "extra", "1")
+        self.assertEqual(h.Frontmatter.read(p), {"status": "review", "extra": "1"})
         self.assertTrue(p.read_text().endswith("# T\n"))
         p.write_text("# no frontmatter\n")
-        self.assertEqual(h.fm_read(p), {})
-        h.fm_set(p, "status", "x")
-        self.assertEqual(h.fm_read(p), {"status": "x"})
-        self.assertEqual(h.fm_read(p.parent / "missing.md"), {})
+        self.assertEqual(h.Frontmatter.read(p), {})
+        h.Frontmatter.set(p, "status", "x")
+        self.assertEqual(h.Frontmatter.read(p), {"status": "x"})
+        self.assertEqual(h.Frontmatter.read(p.parent / "missing.md"), {})
 
     def test_section_and_requirements(self):
         text = "## A\n1\n## Requirements\n<!-- c -->\n- R1: SHALL x\n- R2: withdrawn\nnote\n## B\n"
-        self.assertEqual(h.section(text, "a"), ["1"])
-        self.assertEqual(h.requirement_lines(text), ["- R1: SHALL x", "- R2: withdrawn"])
+        self.assertEqual(h.Markdown.section(text, "a"), ["1"])
+        self.assertEqual(h.FeatureFiles.requirement_lines(text), ["- R1: SHALL x", "- R2: withdrawn"])
 
     def test_next_action_and_groups(self):
         gates = {"approve": "human", "merge": "auto"}
@@ -329,27 +360,75 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(h.state_text("blocked", "", gates), "blocked · needs you")
         self.assertEqual(h.state_text("done", "", gates), "done")
 
+    def test_effort_levels_per_cli(self):
+        native = {
+            "claude": ["low", "medium", "high", "xhigh", "max"],
+            "codex": ["low", "medium", "high", "xhigh", "xhigh"],  # codex has nothing above xhigh
+            "pi": ["low", "medium", "high", "xhigh", "max"],
+        }
+        flag = {"claude": ["--effort", "{}"], "codex": ["-c", "model_reasoning_effort={}"], "pi": ["--thinking", "{}"]}
+        for kind, values in native.items():
+            for ours, theirs in zip(h.EFFORT_LEVELS, values):
+                want = [part.format(theirs) for part in flag[kind]]
+                self.assertEqual(h.CLIS[kind].effort_args(ours), want, (kind, ours))
+        self.assertEqual(h.CLIS["claude"].effort_args(""), [])
+
+    def test_permission_levels_per_cli(self):
+        repo = Path("/r")
+        cases = {
+            ("claude", "ask"): ["--permission-mode", "manual"],
+            ("claude", "edits"): ["--permission-mode", "acceptEdits"],
+            ("claude", "guarded"): ["--permission-mode", "auto"],
+            ("claude", "full"): ["--dangerously-skip-permissions"],
+            ("codex", "ask"): ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+            ("codex", "guarded"): [
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "--add-dir",
+                "/r/.git",
+            ],
+            ("codex", "full"): ["--dangerously-bypass-approvals-and-sandbox"],
+        }
+        for (kind, level), flags in cases.items():
+            self.assertEqual(agent({"kind": kind, "permissions": level}).cli_args(repo), ["--", *flags], (kind, level))
+        self.assertEqual(agent({"kind": "pi", "permissions": "full"}).cli_args(repo), [], "pi never asks: no flag")
+
     def test_patterns_args_prompt(self):
         self.assertTrue(h.valid_pattern(".env"))
         self.assertTrue(h.valid_pattern("data/*.db"))
         for bad in ("/etc/passwd", "../x", "", ".", 3):
             self.assertFalse(h.valid_pattern(bad), bad)
         repo = Path("/r")
-        self.assertEqual(h.agent_cli_args({"kind": "claude"}, repo), [])
-        self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}, repo), ["--", "--model", "m", "-x"])
-        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}, repo), ["--", "--effort", "xhigh"])
+        self.assertEqual(agent({"kind": "claude"}).cli_args(repo), [])
         self.assertEqual(
-            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}, repo),
-            ["--", "--model", "g", "-c", "model_reasoning_effort=high", "-y"],
+            agent({"kind": "gemini", "model": "m", "args": ["-x"]}).cli_args(repo), ["--", "--model", "m", "-x"]
         )
-        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}, repo), [], "no effort setting for pi")
+        self.assertEqual(agent({"kind": "claude", "effort": "extra"}).cli_args(repo), ["--", "--effort", "xhigh"])
         self.assertEqual(
-            h.agent_cli_args({"args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}, repo),
+            agent({"kind": "codex", "model": "g", "effort": "high", "permissions": "full", "args": ["-y"]}).cli_args(
+                repo
+            ),
+            [
+                "--",
+                "--model",
+                "g",
+                "-c",
+                "model_reasoning_effort=high",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-y",
+            ],
+            "model, effort, permissions, then args",
+        )
+        self.assertEqual(agent({"kind": "gemini", "effort": "high", "permissions": "full"}).cli_args(repo), [])
+        self.assertEqual(
+            agent({"kind": "gemini", "args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}).cli_args(repo),
             ["--", "--add-dir", "/r/.git", "-c", "x={a}"],
             "{repo} is the main checkout; other braces stay as written",
         )
         self.assertEqual(
-            h.role_prompt("reviewer", "s", " a\n b "),
+            h.RoleRun.prompt_for("reviewer", "s", " a\n b "),
             "Read harness/roles/reviewer.md and follow it for harness/features/s/. a b",
         )
 
@@ -357,19 +436,16 @@ class PureFunctions(unittest.TestCase):
 # ----------------------------------------------------------------------------- config and worktree files
 class ConfigTests(Case):
     def test_claude_settings_from_the_orchestrator_entry(self):
-        self.assertEqual(h.claude_settings({"kind": "claude"}), {"permissions": {"defaultMode": "default"}})
+        self.assertEqual(agent({"kind": "claude"}).claude_settings(), {"permissions": {"defaultMode": "default"}})
         self.assertEqual(
-            h.claude_settings({"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}),
+            agent({"kind": "claude", "model": "m", "permissions": "full"}).claude_settings(),
             {"permissions": {"defaultMode": "bypassPermissions"}, "model": "m"},
         )
-        self.assertEqual(
-            h.claude_settings({"kind": "claude", "args": ["--permission-mode", "plan"]})["permissions"],
-            {"defaultMode": "plan"},
-        )
-        self.assertEqual(
-            h.claude_settings({"kind": "claude", "args": ["--permission-mode"]})["permissions"],
-            {"defaultMode": "default"},
-        )
+        modes = {"ask": "default", "edits": "acceptEdits", "guarded": "auto", "full": "bypassPermissions"}
+        for level, mode in modes.items():
+            self.assertEqual(
+                agent({"kind": "claude", "permissions": level}).claude_settings()["permissions"]["defaultMode"], mode
+            )
 
     def test_write_local_settings(self):
         p = self.r.root / ".claude" / "settings.local.json"
@@ -378,10 +454,10 @@ class ConfigTests(Case):
         self.r.write_cfg(
             agents={
                 **AGENTS,
-                "orchestrator": {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]},
+                "orchestrator": {"kind": "claude", "model": "m", "permissions": "full"},
             }
         )
-        line = h.write_local_settings(self.r.root, self.r.cfg())
+        line = h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply()
         self.assertIn("model m, permissions bypassPermissions", line)
         self.assertIn("updated; restart", line)
         written = json.loads(p.read_text())
@@ -393,9 +469,9 @@ class ConfigTests(Case):
                 "model": "m",
             },
         )
-        self.assertIn("unchanged", h.write_local_settings(self.r.root, self.r.cfg()))
+        self.assertIn("unchanged", h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply())
         self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "codex"}})
-        self.assertIn("left alone", h.write_local_settings(self.r.root, self.r.cfg()))
+        self.assertIn("left alone", h.ClaudeSettings(self.r.root, self.r.cfg().agent("orchestrator")).apply())
         self.assertEqual(json.loads(p.read_text())["model"], "m")
 
     def test_defaults_and_main_checkout(self):
@@ -407,7 +483,9 @@ class ConfigTests(Case):
         (self.r.wt / "harness" / "config.json").write_text(
             json.dumps({"base_branch": "main", "test_cmd": "false", "agents": AGENTS})
         )
-        self.assertEqual(h.load_cfg(self.r.wt).test_cmd, "true", "config comes from the main checkout, not the branch")
+        self.assertEqual(
+            h.Config.load(self.r.wt).test_cmd, "true", "config comes from the main checkout, not the branch"
+        )
 
     def test_rejects_bad_files(self):
         bad = [
@@ -418,33 +496,54 @@ class ConfigTests(Case):
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "max_review_rounds": -1},
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "max_review_rounds": True},
             {"base_branch": "main", "test_cmd": "true", "agents": AGENTS, "teardown_cmd": 1},
-            {
-                "base_branch": "main",
-                "test_cmd": "true",
-                "agents": {**AGENTS, "reviewer": {"kind": "claude", "effort": "turbo"}},
-            },
-            {
-                "base_branch": "main",
-                "test_cmd": "true",
-                "agents": {**AGENTS, "reviewer": {"kind": "codex", "effort": "max"}},
-            },
-            {
-                "base_branch": "main",
-                "test_cmd": "true",
-                "agents": {**AGENTS, "reviewer": {"kind": "claude", "effort": 3}},
-            },
         ]
         for raw in bad:
             (self.r.root / "harness" / "config.json").write_text(json.dumps(raw))
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-                h.load_cfg(self.r.root)
+                h.Config.load(self.r.root)
         (self.r.root / "harness" / "config.json").write_text("{")
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            h.load_cfg(self.r.root)
+            h.Config.load(self.r.root)
+
+    def test_rejects_agents_outside_the_vocabulary(self):
+        full = {"kind": "claude", "permissions": "full"}
+        bad = {
+            "effort 'turbo' is not ours": (
+                {"reviewer": {**full, "effort": "turbo"}},
+                "effort must be one of low, medium",
+            ),
+            "a provider word": ({"reviewer": {**full, "effort": "xhigh"}}, "here it is 'extra'"),
+            "effort as a number": ({"reviewer": {**full, "effort": 3}}, "effort must be one of"),
+            "unknown permissions": (
+                {"reviewer": {"kind": "claude", "permissions": "yolo"}},
+                "must be one of ask, edits",
+            ),
+            "a role that would ask": ({"reviewer": {"kind": "claude", "permissions": "ask"}}, "first prompt"),
+            "a role without permissions": ({"reviewer": {"kind": "claude"}}, "it is required"),
+            "pi cannot be guarded": ({"reviewer": {"kind": "pi", "permissions": "guarded"}}, "not available for pi"),
+            "codex has no edits": (
+                {"orchestrator": {"kind": "codex", "permissions": "edits"}},
+                "(it has: ask, guarded",
+            ),
+            "the flag by hand": (
+                {"reviewer": {**full, "args": ["--dangerously-skip-permissions"]}},
+                "args sets permissions itself",
+            ),
+        }
+        for why, (agents, msg) in bad.items():
+            self.r.write_cfg(agents={**AGENTS, **agents})
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+                h.Config.load(self.r.root)
+            self.assertIn(msg, err.getvalue(), why)
+        self.r.write_cfg(agents={**AGENTS, "reviewer": {"kind": "gemini", "permissions": "full", "args": ["--yolo"]}})
+        self.assertEqual(
+            h.Config.load(self.r.root).agent("reviewer").kind, "gemini", "an untranslated CLI: flags in args"
+        )
 
     def test_worktreeinclude(self):
         (self.r.root / ".worktreeinclude").write_text("# comment\n\n.env\ndata\n../up\n")
-        pats, bad = h.include_patterns(self.r.root, self.r.cfg())
+        pats, bad = h.WorktreeSetup(self.r.root, self.r.root, self.r.cfg()).patterns()
         self.assertEqual((pats, bad), ([".env", "data"], ["../up"]))
 
     def test_copy_ignored(self):
@@ -455,7 +554,7 @@ class ConfigTests(Case):
         os.symlink("sub/db", root / "data" / "link")
         dst = self.r.tmp / "dst"
         dst.mkdir()
-        line = h.copy_ignored(root, dst, [".env", "data", "data/*", "src/m.py", "nope"])
+        line = h.WorktreeSetup(root, dst, self.r.cfg()).copy_ignored([".env", "data", "data/*", "src/m.py", "nope"])
         self.assertIn("copied .env, data", line)
         self.assertIn("not in the main checkout: nope", line)
         self.assertIn("skipped, not gitignored: src/m.py", line)
@@ -463,102 +562,132 @@ class ConfigTests(Case):
         self.assertEqual((dst / "data" / "sub" / "db").read_text(), "db")
         self.assertTrue((dst / "data" / "link").is_symlink())
         self.assertFalse((dst / "src").exists())
-        self.assertIn("copied .env, data", h.copy_ignored(root, dst, [".env", "data"]), "a second run must not fail")
+        self.assertIn(
+            "copied .env, data",
+            h.WorktreeSetup(root, dst, self.r.cfg()).copy_ignored([".env", "data"]),
+            "a second run must not fail",
+        )
 
 
 # ----------------------------------------------------------------------------- git helpers
 class GitHelpers(Case):
     def test_main_checkout_and_refs(self):
-        self.assertEqual(h.main_checkout(self.r.wt).resolve(), self.r.root.resolve())
-        self.assertTrue(h.is_main_checkout(self.r.root))
-        self.assertFalse(h.is_main_checkout(self.r.wt))
+        self.assertEqual(h.Git(self.r.wt).main_checkout().resolve(), self.r.root.resolve())
+        self.assertTrue(h.Git(self.r.root).is_main())
+        self.assertFalse(h.Git(self.r.wt).is_main())
         ref = "refs/harness/feat/review-start"
-        self.assertFalse(h.ref_exists(ref, self.r.wt))
+        self.assertFalse(h.Git(self.r.wt).ref_exists(ref))
         self.r.ref()
-        self.assertTrue(h.ref_exists(ref, self.r.root), "refs are shared across worktrees")
-        h.drop_ref(ref, self.r.wt)
-        self.assertFalse(h.ref_exists(ref, self.r.wt))
+        self.assertTrue(h.Git(self.r.root).ref_exists(ref), "refs are shared across worktrees")
+        h.Git(self.r.wt).drop_ref(ref)
+        self.assertFalse(h.Git(self.r.wt).ref_exists(ref))
 
     def test_features_everywhere(self):
-        feats = h.features_everywhere(self.r.root)
+        feats = h.Feature.all(self.r.root)
         f = feats["feat"]
         self.assertEqual((f.slug, f.branch, f.status, f.verdict, f.live), ("feat", "feat", "pending", "", True))
         self.assertEqual(f.wt.resolve(), self.r.wt.resolve())
-        self.assertEqual(h.locate(self.r.wt, "feat").dir, f.dir)
+        self.assertEqual(h.Feature.find(self.r.wt, "feat").dir, f.dir)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            h.locate(self.r.root, "nope")
+            h.Feature.find(self.r.root, "nope")
 
     def test_sync_base(self):
-        self.assertEqual(h.sync_base(self.r.wt, "main"), (True, False))
+        self.assertEqual(h.Git(self.r.wt).merge_in("main"), (True, False))
         (self.r.root / "new.txt").write_text("x")
         self.r.commit("main: new")
-        self.assertEqual(h.sync_base(self.r.wt, "main"), (True, True))
+        self.assertEqual(h.Git(self.r.wt).merge_in("main"), (True, True))
         self.assertTrue((self.r.wt / "new.txt").exists())
         (self.r.root / "src" / "m.py").write_text("def f():\n    return 2\n")
         self.r.commit("main: 2")
         (self.r.wt / "src" / "m.py").write_text("def f():\n    return 3\n")
         self.r.commit("feat: 3", cwd=self.r.wt)
-        self.assertEqual(h.sync_base(self.r.wt, "main"), (False, False))
+        self.assertEqual(h.Git(self.r.wt).merge_in("main"), (False, False))
         self.assertEqual(self.r.git("status", "--porcelain", cwd=self.r.wt), "", "a conflict is aborted cleanly")
 
     def test_porcelain_and_changed_paths(self):
         (self.r.wt / "src" / "m.py").write_text("changed\n")
         (self.r.wt / "new dir").mkdir()
         (self.r.wt / "new dir" / "f.txt").write_text("")
-        self.assertEqual(sorted(p for _, p in h.porcelain(self.r.wt)), ["new dir/f.txt", "src/m.py"])
+        self.assertEqual(sorted(p for _, p in h.Git(self.r.wt).porcelain()), ["new dir/f.txt", "src/m.py"])
         self.assertEqual(
-            h.changed_paths(self.r.wt, "main"),
+            h.Git(self.r.wt).changed_paths("main"),
             ["harness/features/feat/spec.md", "harness/features/feat/tasks.md", "new dir/f.txt", "src/m.py"],
         )
 
     def test_approve_commits_and_review_rounds(self):
-        self.assertFalse(h.approved_once(self.r.wt, "feat", "main"))
+        self.assertFalse(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
-        h.approve_spec(self.r.wt, "feat", "feat")
-        self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
-        self.assertEqual(h.review_rounds(self.r.wt, "feat", "main"), 0)
+        h.FeatureFiles(self.r.wt, "feat").approve("feat")
+        self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").review_rounds("main"), 0)
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        h.drop_review(self.r.wt, "feat")
+        h.FeatureFiles(self.r.wt, "feat").drop_review()
         self.r.review("APPROVED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        self.assertEqual(h.review_rounds(self.r.wt, "feat", "main"), 1, "an APPROVED round does not count")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").review_rounds("main"), 1, "an APPROVED round does not count")
         self.assertIn("feat: clear previous review", self.r.git("log", "--format=%s", "main..HEAD", cwd=self.r.wt))
 
     def test_review_rounds_count_changes_requested_rounds_not_commits(self):
-        rounds = lambda: h.review_rounds(self.r.wt, "feat", "main")  # noqa: E731
+        rounds = lambda: h.FeatureFiles(self.r.wt, "feat").review_rounds("main")  # noqa: E731
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
         (self.r.fdir / "review.md").write_text((self.r.fdir / "review.md").read_text() + "- one more finding\n")
         self.r.commit("feat: review, one more finding", cwd=self.r.wt)
         self.assertEqual(rounds(), 1, "two commits in one round are one round")
-        h.drop_review(self.r.wt, "feat")
+        h.FeatureFiles(self.r.wt, "feat").drop_review()
         self.assertEqual(rounds(), 1, "a cleared round still counts")
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
-        h.drop_review(self.r.wt, "feat")
+        h.FeatureFiles(self.r.wt, "feat").drop_review()
         self.assertEqual(rounds(), 2)
         self.r.review("CHANGES_REQUESTED")
         self.r.commit("feat: review", cwd=self.r.wt)
         self.assertEqual(rounds(), 3, "the verdict on disk counts too")
 
     def test_block_feature(self):
-        h.block_feature(self.r.wt, "feat", "why")
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "blocked")
+        h.FeatureFiles(self.r.wt, "feat").block("why")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "blocked")
         log = (self.r.fdir / "log.md").read_text()
         self.assertTrue(log.startswith("# Log\n"))
         self.assertIn("launcher\n- blockers: why", log)
         self.assertEqual(self.r.git("status", "--porcelain", cwd=self.r.wt), "")
 
     def test_driver_lock(self):
-        self.assertEqual(h.driver_running(self.r.wt), 0)
-        lock = h.driver_lock(self.r.wt)
-        lock.write_text(str(os.getpid()))
-        self.assertEqual(h.driver_running(self.r.wt), os.getpid())
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0)
+        lock = h.DriverLock(self.r.wt).path
+        pid = fake_driver(self)
+        lock.write_text(str(pid))
+        self.assertEqual(h.DriverLock(self.r.wt).running(), pid)
         lock.write_text("999999999")
-        self.assertEqual(h.driver_running(self.r.wt), 0, "a stale lock counts as no driver")
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0, "a stale lock counts as no driver")
+        if ps_works():
+            lock.write_text(str(os.getpid()))
+            self.assertEqual(h.DriverLock(self.r.wt).running(), 0, "a live pid that is not a driver: the OS reused it")
+
+    def test_acquire_driver_lock(self):
+        lock = h.DriverLock(self.r.wt).path
+        self.assertEqual(h.DriverLock(self.r.wt).acquire(), 0)
+        self.assertEqual(lock.read_text(), str(os.getpid()))
+        lock.unlink()
+        pid = fake_driver(self)
+        lock.write_text(str(pid))
+        self.assertEqual(h.DriverLock(self.r.wt).acquire(), pid, "a live driver keeps its lock")
+        lock.write_text("999999999")
+        self.assertEqual(h.DriverLock(self.r.wt).acquire(), 0, "a dead driver's lock is taken over")
+        self.assertEqual(lock.read_text(), str(os.getpid()))
+
+    def test_a_second_driver_refuses_to_run(self):
+        h.DriverLock(self.r.wt).path.write_text(str(fake_driver(self)))
+        f = h.Feature.find(self.r.root, "feat")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = h.Driver(self.r.root, self.r.cfg(), f, "", "").run()
+        self.assertEqual(code, h.EXIT_ERROR)
+        self.assertIn("is already running feat", err.getvalue())
+        self.assertFalse(h.DriverLock(self.r.wt).stamp.exists(), "it stops before announcing a start")
 
 
 # ----------------------------------------------------------------------------- check rules
@@ -568,7 +697,7 @@ class CheckRules(Case):
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
-        h.approve_spec(self.r.wt, "feat", "feat")
+        h.FeatureFiles(self.r.wt, "feat").approve("feat")
         self.r.spec("in_progress")
         self.r.implemented()
         self.r.commit("feat: T1", cwd=self.r.wt)
@@ -593,6 +722,35 @@ class CheckRules(Case):
         self.assertIn("feat: ## Open questions is not empty (answer them or set status blocked)", errs)
         self.r.spec("spec_ready", reqs="- R1: withdrawn")
         self.assertIn("feat: no active requirement line '- R<n>: ... SHALL ...' under ## Requirements", self.r.check())
+
+    def test_rule_2_ears(self):
+        good = [
+            "THE SYSTEM SHALL log every request.",
+            "WHEN a user logs in, THE SYSTEM SHALL set a cookie.",
+            "WHILE offline, THE SYSTEM SHALL queue writes.",
+            "WHERE dark mode is enabled, THE SYSTEM SHALL use the dark palette.",
+            "IF the token is expired, THEN THE SYSTEM SHALL return 401.",
+            "WHILE offline, WHEN a write arrives, THE SYSTEM SHALL queue it.",
+            "WHEN a, b, or c happens, THE API SHALL return 200 within 2 s.",
+        ]
+        bad = {
+            "WHEN x, THE SYSTEM SHALL y and SHALL z.": "has 2 SHALLs; one per requirement",
+            "IF x, THE SYSTEM SHALL y.": "follows no EARS pattern",
+            "SHALL return 1.": "follows no EARS pattern",
+            "The system SHALL return 1.": "follows no EARS pattern",
+            "The system shall return 1.": "has no SHALL",
+        }
+        lines = [f"- R{i}: {t}" for i, t in enumerate([*good, *bad], 1)]
+        self.r.spec("spec_ready", reqs="\n".join(lines))
+        self.r.tasks(f"- [ ] T1: all ({', '.join(f'R{i}' for i in range(1, len(lines) + 1))})")
+        errs = self.r.check()
+        for i, (text, why) in enumerate(bad.items(), len(good) + 1):
+            self.assertTrue(any(e.startswith(f"feat: R{i} {why}") for e in errs), (text, errs))
+        self.assertEqual(len(errs), len(bad), errs)
+
+    def test_fixture_requirements_are_ears(self):
+        for text in (R1, "- R2: THE SYSTEM SHALL z."):
+            self.assertTrue(h.EARS_RE.match(h.REQ_RE.match(text)[2]), text)
 
     def test_rule_3(self):
         self.r.spec("spec_ready", reqs=R1 + "\n- R2: THE SYSTEM SHALL z.")
@@ -637,7 +795,7 @@ class CheckRules(Case):
         tmpl = self.r.wt / "harness" / "features" / "_template"
         for name in ("spec.md", "tasks.md"):
             (self.r.fdir / name).write_text((tmpl / name).read_text().replace("{{slug}}", "feat"))
-        h.fm_set(self.r.fdir / "spec.md", "status", "spec_ready")
+        h.Frontmatter.set(self.r.fdir / "spec.md", "status", "spec_ready")
         errs = self.r.check()
         for err in (
             "feat: R1 still has the template placeholder <trigger>",
@@ -714,9 +872,11 @@ class CheckRules(Case):
         self.r.spec("in_progress")
         self.r.commit("feat: review", cwd=self.r.wt)
         self.assertIsNone(
-            h.preflight(self.r.cfg(), self.r.wt, "implementer", "feat", "in_progress", "CHANGES_REQUESTED")
+            h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "implementer", "feat").blocker(
+                "in_progress", "CHANGES_REQUESTED"
+            )
         )
-        self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.wt))
+        self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
         (self.r.wt / "src" / "m.py").write_text("print(3)\n")
         self.r.commit("feat: T2", cwd=self.r.wt)
         self.assertEqual(self.r.check(), [])
@@ -727,12 +887,12 @@ class CheckRules(Case):
         main_feat = self.r.root / "harness" / "features" / "feat"
         shutil.copytree(self.r.fdir, main_feat)
         shutil.copy(self.r.wt / "tests" / "test_feat.py", self.r.root / "tests" / "test_feat.py")
-        h.fm_set(main_feat / "spec.md", "status", "done")
+        h.Frontmatter.set(main_feat / "spec.md", "status", "done")
         self.r.commit("feat: done")
         (self.r.root / "harness" / "harness.py").write_text("# local edit\n")
-        self.assertEqual(h.check_feature(self.r.root, "feat", "main"), [], "no scope rules on the main checkout")
-        self.assertEqual(h.check_feature(self.r.root, "nope", "main"), ["nope: missing spec.md"])
-        h.fm_set(self.r.fdir / "spec.md", "status", "bogus")
+        self.assertEqual(h.Checker(self.r.root, "feat", "main").errors(), [], "no scope rules on the main checkout")
+        self.assertEqual(h.Checker(self.r.root, "nope", "main").errors(), ["nope: missing spec.md"])
+        h.Frontmatter.set(self.r.fdir / "spec.md", "status", "bogus")
         self.assertEqual(len(self.r.check()), 1)
         self.assertIn("is not one of", self.r.check()[0])
 
@@ -741,17 +901,26 @@ class CheckRules(Case):
 class RoleRuns(Case):
     def test_evaluate_outcomes(self):
         cfg = self.r.cfg()
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", False, "", cfg)[0], "STILL_WORKING")
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "agent_blocked", cfg)[0], "NEEDS_ATTENTION")
-        self.stub("agent_state", lambda name: "blocked")
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)[0], "NEEDS_ATTENTION")
-        self.stub("agent_state", lambda name: "idle")
-        result, note, errs, _ = h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)
+        self.assertEqual(
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(False, "").result, "STILL_WORKING"
+        )
+        self.assertEqual(
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "agent_blocked").result,
+            "NEEDS_ATTENTION",
+        )
+        self.stub_herdr("state", lambda name: "blocked")
+        self.assertEqual(
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "").result, "NEEDS_ATTENTION"
+        )
+        self.stub_herdr("state", lambda name: "idle")
+        out = h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "")
+        result, note, errs = out.result, out.note, out.errors
         self.assertEqual((result, errs), ("NEEDS_ATTENTION", []))
         self.assertIn("is not what spec_author must leave", note)
         self.r.spec("spec_ready")
         self.r.tasks()
-        result, note, errs, _ = h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)
+        out = h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "")
+        result, note, errs = out.result, out.note, out.errors
         self.assertEqual((result, note), ("NEEDS_ATTENTION", "check fails"))
         self.assertEqual(len(errs), 1)
         self.assertIn(
@@ -759,14 +928,15 @@ class RoleRuns(Case):
             errs[0][:120],
         )
         self.r.commit("feat: spec", cwd=self.r.wt)
-        self.assertEqual(h.evaluate(self.r.wt, "spec_author", "feat", True, "", cfg)[0], "DONE")
+        self.assertEqual(h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").outcome(True, "").result, "DONE")
 
     def test_evaluate_discards_implementer_verdict(self):
         self.r.spec("review")
         self.r.implemented()
         self.r.review("APPROVED")
         self.r.commit("feat: T1", cwd=self.r.wt)
-        result, note, errs, _ = h.evaluate(self.r.wt, "implementer", "feat", True, "", self.r.cfg())
+        out = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "implementer", "feat").outcome(True, "")
+        result, note, errs = out.result, out.note, out.errors
         self.assertEqual((result, note, errs), ("DONE", "discarded a verdict the implementer wrote", []))
         self.assertFalse((self.r.fdir / "review.md").exists())
         self.assertEqual(self.r.git("log", "--format=%s", "-1", cwd=self.r.wt), "feat: clear previous review")
@@ -780,23 +950,29 @@ class RoleRuns(Case):
         self.r.review("CHANGES_REQUESTED")
         self.r.spec("in_progress")
         self.r.commit("feat: review", cwd=self.r.wt)
-        result, note, _, _ = h.evaluate(self.r.wt, "reviewer", "feat", True, "", self.r.cfg())
+        out = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").outcome(True, "")
+        result, note = out.result, out.note
         self.assertEqual((result, note), ("NEEDS_ATTENTION", "blocked after 1 review rounds"))
-        self.assertEqual(h.feature_state(self.r.fdir), ("blocked", "CHANGES_REQUESTED"))
-        self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.wt))
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state(), ("blocked", "CHANGES_REQUESTED"))
+        self.assertFalse(h.Git(self.r.wt).ref_exists("refs/harness/feat/review-start"))
         self.assertIn("max_review_rounds", (self.r.fdir / "log.md").read_text())
 
     def test_preflight_refusals(self):
         cfg = self.r.cfg()
         self.assertIn(
             "cannot run reviewer while status is 'pending'",
-            h.preflight(cfg, self.r.wt, "reviewer", "feat", "pending", ""),
+            h.RoleRun(cfg, self.r.root, self.r.wt, "reviewer", "feat").blocker("pending", ""),
         )
         (self.r.wt / "x.txt").write_text("")
-        self.assertIn("uncommitted changes", h.preflight(cfg, self.r.wt, "spec_author", "feat", "pending", ""))
+        self.assertIn(
+            "uncommitted changes", h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").blocker("pending", "")
+        )
         (self.r.wt / "x.txt").unlink()
-        self.stub("agent_state", lambda name: "working")
-        self.assertIn("spec-feat is still working", h.preflight(cfg, self.r.wt, "spec_author", "feat", "pending", ""))
+        self.stub_herdr("state", lambda name: "working")
+        self.assertIn(
+            "spec-feat is still working",
+            h.RoleRun(cfg, self.r.root, self.r.wt, "spec_author", "feat").blocker("pending", ""),
+        )
 
     def review_ready(self):
         self.r.spec("review")
@@ -809,7 +985,9 @@ class RoleRuns(Case):
         self.r.commit("feat: old review", cwd=self.r.wt)
         (self.r.root / "new.txt").write_text("x")
         self.r.commit("main: new")
-        self.assertIsNone(h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", "CHANGES_REQUESTED"))
+        self.assertIsNone(
+            h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", "CHANGES_REQUESTED")
+        )
         self.assertTrue((self.r.wt / "new.txt").exists(), "the base branch was merged in")
         self.assertFalse((self.r.fdir / "review.md").exists(), "the old verdict is gone")
         self.assertEqual(
@@ -821,11 +999,12 @@ class RoleRuns(Case):
         self.review_ready()
         self.r.write_cfg(test_cmd="false")
         self.assertIsNone(
-            h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", ""), "nothing merged in: no test run"
+            h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", ""),
+            "nothing merged in: no test run",
         )
         (self.r.root / "new.txt").write_text("x")
         self.r.commit("main: new")
-        err = h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", "")
+        err = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", "")
         self.assertIn("check --tests fails on 'feat' after merging 'main'", err)
         self.assertIn("tests failed (exit 1: false)", err)
 
@@ -835,7 +1014,7 @@ class RoleRuns(Case):
         self.r.commit("main: 2")
         (self.r.wt / "src" / "m.py").write_text("def f():\n    return 3\n")
         self.r.commit("feat: 3", cwd=self.r.wt)
-        err = h.preflight(self.r.cfg(), self.r.wt, "reviewer", "feat", "review", "")
+        err = h.RoleRun(self.r.cfg(), self.r.root, self.r.wt, "reviewer", "feat").blocker("review", "")
         self.assertIn("merging 'main' into 'feat' conflicts", err)
         self.assertEqual(self.r.git("status", "--porcelain", cwd=self.r.wt), "")
 
@@ -847,9 +1026,9 @@ class DriverTests(Case):
         self.calls: list[tuple[str, str]] = []
         self.notes: list[str] = []
         self.actions: dict[str, list] = {"spec_author": [], "implementer": [], "reviewer": []}
-        self.stub("prompt_or_start", self.fake_prompt)
-        self.stub("wait_agent", lambda name, ms: (True, ""))
-        self.stub("notify", lambda pane, text: self.notes.append(text))
+        self.stub_herdr("prompt_or_start", self.fake_prompt)
+        self.stub_herdr("wait", lambda name, ms: (True, ""))
+        self.stub_herdr("notify", lambda pane, text: self.notes.append(text))
         self.merged = []
         self.stub("Driver", type("Driver", (h.Driver,), {"spawn_merge": lambda driver: self.fake_merge(driver)}))
 
@@ -860,7 +1039,7 @@ class DriverTests(Case):
 
     def fake_merge(self, driver):
         self.merged.append(driver.slug)
-        driver.lock.unlink()
+        driver.lock.release()
         raise h._Stop(h.EXIT_DONE)
 
     # role behaviours
@@ -898,8 +1077,43 @@ class DriverTests(Case):
                 self.doCleanups()
 
     def drive(self, msg="", notify="pane"):
-        f = h.locate(self.r.root, "feat")
+        f = h.Feature.find(self.r.root, "feat")
         return self.output(h.Driver(self.r.root, self.r.cfg(), f, msg, notify).run)
+
+    def stuck_role(self, max_minutes, settle_after):
+        """A spec author whose prompt never settles by itself; wait_agent settles after `settle_after` waits; each
+        wait moves the clock 10 minutes."""
+        self.r.write_cfg(max_role_minutes=max_minutes)
+        clock, waits = [0.0], [0]
+
+        def wait(name, ms):
+            clock[0] += 600
+            waits[0] += 1
+            return waits[0] >= settle_after, ""
+
+        def prompt(root, wt, role, slug, text, timeout_ms, acfg):
+            self.fake_prompt(root, wt, role, slug, text, timeout_ms, acfg)
+            return False, ""
+
+        self.stub_herdr("wait", wait)
+        self.stub_herdr("prompt_or_start", prompt)
+        self.stub("time", types.SimpleNamespace(time=lambda: clock[0], sleep=lambda s: None))
+        self.actions["spec_author"] = [self.spec_author]
+        return waits
+
+    def test_a_role_past_max_role_minutes_stops_the_driver(self):
+        waits = self.stuck_role(max_minutes=30, settle_after=99)
+        code, _ = self.drive()
+        self.assertEqual(code, h.EXIT_ATTENTION)
+        self.assertIn("needs you: spec_author still working after 30 min (max_role_minutes 30)", self.notes[-1])
+        self.assertEqual(waits[0], 3)
+
+    def test_no_role_limit_waits_until_the_role_settles(self):
+        waits = self.stuck_role(max_minutes=0, settle_after=20)
+        code, _ = self.drive()  # human approve gate: stops at spec_ready once the spec author settles
+        self.assertEqual(code, h.EXIT_DONE)
+        self.assertEqual(waits[0], 20)
+        self.assertIn("spec ready, needs you", self.notes[-1])
 
     def test_auto_gates_run_to_the_merge(self):
         self.r.write_cfg(gates={"approve": "auto", "merge": "auto"})
@@ -910,9 +1124,9 @@ class DriverTests(Case):
         self.assertEqual(code, h.EXIT_DONE)
         self.assertEqual([role for role, _ in self.calls], ["spec_author", "implementer", "reviewer"])
         self.assertEqual(self.merged, ["feat"])
-        self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
+        self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
         self.assertIn("run reviewer", out)
-        self.assertEqual(h.driver_running(self.r.wt), 0)
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0)
 
     def test_human_gate_stops_and_notifies(self):
         self.actions["spec_author"] = [self.spec_author]
@@ -920,8 +1134,8 @@ class DriverTests(Case):
         self.assertEqual(code, h.EXIT_DONE)
         self.assertEqual(len(self.notes), 1)
         self.assertIn("harness: feat spec ready, needs you", self.notes[0])
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "spec_ready")
-        self.assertEqual(h.driver_running(self.r.wt), 0)
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "spec_ready")
+        self.assertEqual(h.DriverLock(self.r.wt).running(), 0)
         self.assertFalse(self.merged)
 
     def test_message_at_the_gate_goes_to_the_judged_role(self):
@@ -958,7 +1172,7 @@ class DriverTests(Case):
         self.assertEqual(
             [role for role, _ in self.calls], ["spec_author", "implementer", "reviewer", "implementer", "reviewer"]
         )
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "blocked")
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "blocked")
         self.assertIn("blocked, needs you", self.notes[-1])
         self.assertFalse(self.merged)
 
@@ -980,10 +1194,10 @@ class Commands(Case):
         self.assertIn("1 working", out)
         self.assertIn("(agent working)", out)
         self.stub("role_working", lambda role, slug: False)
-        h.driver_lock(self.r.wt).write_text(str(os.getpid()))
+        h.DriverLock(self.r.wt).path.write_text(str(fake_driver(self)))
         _, out = self.output(h.cmd_status, Namespace())
         self.assertIn("(driver running)", out)
-        h.driver_lock(self.r.wt).unlink()
+        h.DriverLock(self.r.wt).path.unlink()
         self.r.spec("spec_ready")
         self.r.tasks()
         _, out = self.output(h.cmd_status, Namespace())
@@ -994,22 +1208,26 @@ class Commands(Case):
         self.chdir(self.r.wt)  # from a worktree it still shows the main checkout's config
         agents = {
             **AGENTS,
-            "implementer": {"kind": "codex", "effort": "xhigh", "args": ["-x"]},
-            "reviewer": {"kind": "pi", "effort": "high"},
+            "implementer": {"kind": "codex", "effort": "max", "permissions": "guarded", "args": ["-x"]},
+            "reviewer": {"kind": "gemini", "effort": "high", "permissions": "full"},
         }
         self.r.write_cfg(gates={"approve": "auto"}, agents=agents)
         code, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertEqual(code, 0)
         self.assertIn("gates              approve: auto   merge: human", out)
-        self.assertIn("implementer        codex   (default model)              effort xhigh   -x", out)
-        self.assertIn("effort high (ignored: no effort setting for this CLI)", out)
+        self.assertIn("implementer        codex   (default model)", out)
+        self.assertIn("effort       max (codex: xhigh)", out)
+        self.assertIn("permissions  guarded: never asks, the CLI blocks risky actions; its sandbox", out)
+        self.assertIn("args         -x", out)
+        self.assertIn("effort       high (not translated for gemini: put its flag in args)", out)
+        self.assertIn("permissions  full (not translated for gemini: put its flags in args)", out)
         self.assertIn("(only used by start --detach)", out)
         self.assertIn("copy_files         .env", out)
 
     def test_config_shows_and_only_apply_writes_the_settings(self):
         self.chdir(self.r.root)
         p = self.r.root / ".claude" / "settings.local.json"
-        orch = {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}
+        orch = {"kind": "claude", "model": "m", "permissions": "full"}
         self.r.write_cfg(agents={**AGENTS, "orchestrator": orch})
         _, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertFalse(p.exists(), "plain config never writes: raising permissions is the human's call")
@@ -1030,7 +1248,7 @@ class Commands(Case):
             self.r.git("worktree", "add", "-q", "-b", slug, str(path), base)
             return {"worktree": {"path": str(path)}, "workspace": {"workspace_id": "w9"}}
 
-        self.stub("create_worktree", create)
+        self.stub_herdr("create_worktree", create)
         code, _ = self.output(h.cmd_start, Namespace(slug="newf", intent="do y", trust=False, detach=False))
         self.assertEqual(code, 0)
         self.assertTrue((self.r.tmp / "wt-new" / "harness" / "features" / "newf" / "spec.md").exists())
@@ -1049,7 +1267,7 @@ class Commands(Case):
 
     def test_approve_requires_spec_ready_and_green_check(self):
         self.chdir(self.r.root)
-        self.stub("resume", lambda *a: 0)
+        self.stub_herdr("resume", lambda *a: 0)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             h.cmd_approve(Namespace(slug="feat"))
         self.r.spec("spec_ready", reqs="- R1: returns 1.")
@@ -1065,13 +1283,13 @@ class Commands(Case):
         self.r.commit("feat: spec fixed", cwd=self.r.wt)
         code, _ = self.output(h.cmd_approve, Namespace(slug="feat"))
         self.assertEqual(code, 0)
-        self.assertEqual(h.feature_state(self.r.fdir)[0], "approved")
-        self.assertTrue(h.approved_once(self.r.wt, "feat", "main"))
+        self.assertEqual(h.FeatureFiles(self.r.wt, "feat").state()[0], "approved")
+        self.assertTrue(h.FeatureFiles(self.r.wt, "feat").approved_once("main"))
 
     def test_merge_reports_a_failure_to_the_notify_pane(self):
         self.chdir(self.r.root)
         notes = []
-        self.stub("notify", lambda pane, text: notes.append(text))
+        self.stub_herdr("notify", lambda pane, text: notes.append(text))
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
             h.cmd_merge(Namespace(slug="feat", notify="wB:p2"))
         self.assertEqual(ctx.exception.code, h.EXIT_ERROR)
@@ -1084,11 +1302,11 @@ class Commands(Case):
 
     def test_merge_lands_and_cleans_up(self):
         self.chdir(self.r.root)
-        self.stub("workspace_of", lambda wt: None)
+        self.stub_herdr("workspace_of", lambda wt: None)
         self.r.spec("spec_ready")
         self.r.tasks()
         self.r.commit("feat: spec", cwd=self.r.wt)
-        h.approve_spec(self.r.wt, "feat", "feat")
+        h.FeatureFiles(self.r.wt, "feat").approve("feat")
         self.r.spec("review")
         self.r.implemented()
         self.r.commit("feat: T1", cwd=self.r.wt)
@@ -1096,26 +1314,30 @@ class Commands(Case):
         self.r.review("APPROVED")
         self.r.commit("feat: review", cwd=self.r.wt)
         notes = []
-        self.stub("notify", lambda pane, text: notes.append((pane, text)))
+        self.stub_herdr("notify", lambda pane, text: notes.append((pane, text)))
         code, out = self.output(h.cmd_merge, Namespace(slug="feat", notify="wB:p2"))
         self.assertEqual(code, 0)
         self.assertIn("merged feat into main", out)
         self.assertEqual(notes[-1][0], "wB:p2")
         self.assertIn("harness: feat merged into main at", notes[-1][1])
-        self.assertEqual(h.fm_read(self.r.root / "harness" / "features" / "feat" / "spec.md")["status"], "done")
+        self.assertEqual(
+            h.Frontmatter.read(self.r.root / "harness" / "features" / "feat" / "spec.md")["status"], "done"
+        )
         self.assertTrue((self.r.root / "tests" / "test_feat.py").exists())
         self.assertFalse(self.r.wt.exists())
         self.assertNotIn("feat", self.r.git("branch", "--format=%(refname:short)"))
-        self.assertFalse(h.ref_exists("refs/harness/feat/review-start", self.r.root))
+        self.assertFalse(h.Git(self.r.root).ref_exists("refs/harness/feat/review-start"))
 
 
 # ----------------------------------------------------------------------------- the herdr adapter, through a fake herdr
 class HerdrAdapter(Case):
     fake_herdr = True
-    ACFG = {"kind": "claude", "model": "m", "effort": "high", "args": ["--dangerously-skip-permissions"]}
+    ACFG = {"kind": "claude", "model": "m", "effort": "high", "permissions": "full"}
 
     def test_prompt_or_start_starts_the_agent_in_its_own_tab(self):
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, self.ACFG)
+        settled, note = h.HERDR.prompt_or_start(
+            self.r.root, self.r.wt, "implementer", "feat", "do it", 1000, agent(self.ACFG)
+        )
         self.assertEqual((settled, note), (True, ""))
         self.assertEqual(
             self.calls("tab", "create"),
@@ -1149,13 +1371,17 @@ class HerdrAdapter(Case):
 
     def test_repo_placeholder_is_the_main_checkout(self):
         acfg = {"kind": "codex", "args": ["--add-dir", "{repo}/.git"]}
-        h.prompt_or_start(self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, acfg)  # from inside the worktree
+        h.HERDR.prompt_or_start(
+            self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, agent(acfg)
+        )  # from inside the worktree
         self.assertEqual(self.calls("agent", "start")[0][-2:], ["--add-dir", f"{self.r.root.resolve()}/.git"])
 
     def test_startup_dialogs_are_answered(self):
         self.state.update(start_status="blocked", screen="Do you trust this folder? (y/n)")
         self.save_state()
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, self.ACFG)
+        settled, note = h.HERDR.prompt_or_start(
+            self.r.root, self.r.wt, "reviewer", "feat", "go", 1000, agent(self.ACFG)
+        )
         self.assertEqual((settled, note), (True, ""))
         self.assertEqual(
             self.calls("agent", "send-keys"),
@@ -1163,37 +1389,47 @@ class HerdrAdapter(Case):
         )
         self.state.update(screen="Something unexpected?", agents={})
         self.save_state()
-        settled, note = h.prompt_or_start(self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, self.ACFG)
+        settled, note = h.HERDR.prompt_or_start(
+            self.r.root, self.r.wt, "spec_author", "feat", "go", 1000, agent(self.ACFG)
+        )
         self.assertEqual((settled, note), (True, "blocked at startup"))
+        self.state.update(screen="Do you trust this folder? (y/n)", agents={})
+        self.save_state()
+        codex = {"kind": "codex", "permissions": "full"}
+        settled, note = h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "go", 1000, agent(codex))
+        self.assertEqual(note, "blocked at startup", "a dialog is answered only for the CLI known to show it")
+        self.assertEqual(len(self.calls("agent", "send-keys")), 2)
 
     def test_prompt_outcomes_for_an_existing_agent(self):
         self.state["agents"] = {"impl-feat": {"status": "idle"}}
         self.state["prompt_error"] = "timeout"
         self.save_state()
         self.assertEqual(
-            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, self.ACFG), (False, "")
+            h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)),
+            (False, ""),
         )
         self.state["prompt_error"] = "agent_blocked"
         self.save_state()
         self.assertEqual(
-            h.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, self.ACFG), (True, "agent_blocked")
+            h.HERDR.prompt_or_start(self.r.root, self.r.wt, "implementer", "feat", "x", 5, agent(self.ACFG)),
+            (True, "agent_blocked"),
         )
         self.assertEqual(self.calls("agent", "start"), [], "an existing agent is never started again")
-        self.assertEqual(h.agent_state("impl-feat"), "idle")
-        self.assertEqual(h.agent_state("nobody"), "gone")
-        self.assertEqual(h.wait_agent("nobody", 5), (True, "agent_not_found"))
+        self.assertEqual(h.HERDR.state("impl-feat"), "idle")
+        self.assertEqual(h.HERDR.state("nobody"), "gone")
+        self.assertEqual(h.HERDR.wait("nobody", 5), (True, "agent_not_found"))
         self.state["wait_error"] = "timeout"
         self.save_state()
-        self.assertEqual(h.wait_agent("impl-feat", 5), (False, ""))
+        self.assertEqual(h.HERDR.wait("impl-feat", 5), (False, ""))
 
     def test_launch_driver_uses_the_driver_tab(self):
-        stamp = h.driver_stamp(self.r.wt)
+        stamp = h.DriverLock(self.r.wt).stamp
         self.state["touch_on_pane_run"] = str(stamp)
         self.save_state()
-        h.driver_lock(self.r.wt).write_text("999999999")  # a lock left by a driver that died
-        pane = h.launch_driver(self.r.root, self.r.wt, "feat", "two\nlines of feedback", "wB:p2")
+        h.DriverLock(self.r.wt).path.write_text("999999999")  # a lock left by a driver that died
+        pane = h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "two\nlines of feedback", "wB:p2")
         self.assertEqual(pane, "w1:p2")
-        self.assertFalse(h.driver_lock(self.r.wt).exists(), "the stale lock was removed before the launch")
+        self.assertFalse(h.DriverLock(self.r.wt).path.exists(), "the stale lock was removed before the launch")
         self.assertEqual(self.calls("tab", "create")[0][6:], ["--label", "driver", "--no-focus"])
         run = self.calls("pane", "run")[0]
         self.assertEqual(run[:3], ["pane", "run", "w1:p2"])
@@ -1205,26 +1441,26 @@ class HerdrAdapter(Case):
             tabs=[{"tab_id": "w1:t5", "label": "driver"}], panes=[sidebar, {"pane_id": "w1:p7", "tab_id": "w1:t5"}]
         )
         self.save_state()
-        self.assertEqual(h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p7")
+        self.assertEqual(h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p7")
         self.assertEqual(len(self.calls("tab", "create")), 1, "an existing driver tab is reused")
         self.assertTrue(self.calls("pane", "run")[-1][3].endswith("drive feat"))
         self.assertEqual(self.calls("pane", "run")[-1][2], "w1:p7", "never the Sidebar pane")
         self.state["panes"] = [sidebar, {"pane_id": "w1:p9", "tab_id": "w1:t5", "agent": "claude"}]
         self.save_state()
         self.assertEqual(
-            h.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p9", "the only shell-ish pane left"
+            h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "", ""), "w1:p9", "the only shell-ish pane left"
         )
 
     def test_launch_driver_reports_a_driver_that_did_not_start(self):
         with self.assertRaises(h.HerdrError) as ctx:
-            h.launch_driver(self.r.root, self.r.wt, "feat", "", "")
+            h.HERDR.launch_driver(self.r.root, self.r.wt, "feat", "", "")
         self.assertEqual(ctx.exception.code, "driver_not_started")
         self.assertIn("herdr pane read w1:p2", ctx.exception.message)
         self.assertEqual(len(self.calls("pane", "run")), 1)
 
     def test_worktree_create_nests_under_the_callers_workspace(self):
         self.setenv("HERDR_WORKSPACE_ID", "w0")
-        res = h.create_worktree(self.r.root, "newf", "main", trust=True)
+        res = h.HERDR.create_worktree(self.r.root, "newf", "main", trust=True)
         self.assertEqual(res["worktree"]["path"], str(self.r.tmp / "new-wt"))
         create = self.calls("worktree", "create")[0]
         self.assertEqual(
@@ -1234,20 +1470,20 @@ class HerdrAdapter(Case):
             create[4:], ["--branch", "newf", "--base", "main", "--label", "newf", "--no-focus", "--trust-repository"]
         )
         self.setenv("HERDR_WORKSPACE_ID", None)
-        h.create_worktree(self.r.root, "other", "main", trust=False)
+        h.HERDR.create_worktree(self.r.root, "other", "main", trust=False)
         self.assertEqual(self.calls("worktree", "create")[1][2:4], ["--cwd", str(self.r.root)])
         self.assertNotIn("--trust-repository", self.calls("worktree", "create")[1])
-        self.assertEqual(h.worktree_workspace(self.r.root, self.r.wt), "w1")
+        self.assertEqual(h.HERDR.open_workspace(self.r.root, self.r.wt), "w1")
         closed = self.r.tmp / "closed"  # a real worktree whose herdr workspace is closed: it gets reopened
         self.r.git("worktree", "add", "-q", "-b", "closed", str(closed))
-        self.assertEqual(h.worktree_workspace(self.r.root, closed), "w9")
+        self.assertEqual(h.HERDR.open_workspace(self.r.root, closed), "w9")
         self.assertEqual(
             self.calls("worktree", "open")[0][2:],
             ["--cwd", str(self.r.root), "--path", str(closed), "--no-focus"],
         )
 
     def test_sidebar_notify_and_remove_worktree(self):
-        h.sidebar(self.r.wt, "spec ready · needs you: approve")
+        h.HERDR.sidebar(self.r.wt, "spec ready · needs you: approve")
         self.assertEqual(
             self.calls("workspace", "report-metadata"),
             [
@@ -1264,7 +1500,7 @@ class HerdrAdapter(Case):
         )
         self.state["agents"] = {"wB:p2": {"status": "idle"}}
         self.save_state()
-        h.notify("wB:p2", "harness: feat is done")
+        h.HERDR.notify("wB:p2", "harness: feat is done")
         self.assertEqual(self.calls("agent", "prompt")[-1], ["agent", "prompt", "wB:p2", "harness: feat is done"])
         self.r.git("merge", "-q", "--no-edit", "feat")  # the branch must be merged for `git branch -d`
         self.r.write_cfg(teardown_cmd="echo torn > teardown.txt")
@@ -1313,6 +1549,58 @@ class HerdrAdapter(Case):
         self.assertIn("one herdr workspace on the main checkout (found w0, w7)", "\n".join(doc.problems))
         self.assertIn("workspace w8 'gone' points at a removed worktree", "\n".join(doc.problems))
         self.assertIn("herdr workspace close w8", out)
+
+
+class DoctorChecks(Case):
+    def test_baseline_runs_test_cmd_unless_skipped(self):
+        self.r.write_cfg(test_cmd="echo boom; false")
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertIn("FAIL  test_cmd green on the main checkout (echo boom; false)", out)
+        self.assertIn("boom", out)
+        self.assertIn("blamed on the first feature's implementer", out)
+        doc = h.Doctor(self.r.root, tests=False)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertEqual((out, doc.problems), ("", []))
+        self.assertIn("test_cmd not run (--no-tests)", doc.notes)
+        self.r.write_cfg(test_cmd="true")
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertIn("ok    test_cmd green on the main checkout (true)", out)
+
+    def test_models_probe_each_cli_and_model_once(self):
+        bindir, log = self.r.tmp / "bin", self.r.tmp / "probes.log"
+        bindir.mkdir()
+        fake = (
+            f'#!/bin/sh\necho "$(basename "$0") $*" >> {log}\n'
+            'case "$*" in *bad*) echo "unknown model" >&2; exit 1;; esac\necho OK\n'
+        )
+        for cli in ("claude", "codex"):
+            (bindir / cli).write_text(fake)
+            (bindir / cli).chmod(0o755)
+        self.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        self.r.write_cfg(
+            agents={
+                "orchestrator": {"kind": "claude", "model": "good"},
+                "spec_author": {"kind": "claude", "model": "good", "permissions": "full"},
+                "implementer": {"kind": "pi", "model": "x/y", "permissions": "full"},
+                "reviewer": {"kind": "codex", "model": "bad", "permissions": "guarded"},
+            }
+        )
+        doc = h.Doctor(self.r.root, models=True)
+        _, out = self.output(doc.models_check, self.r.cfg())
+        self.assertIn("ok    spec_author: claude answers with model good", out)
+        self.assertIn("ok    orchestrator: claude answers with model good", out)
+        self.assertIn("FAIL  reviewer: codex answers with model bad", out)
+        self.assertIn("unknown model", out)
+        self.assertIn("implementer: pi model not checked", doc.notes)
+        probes = log.read_text().splitlines()
+        self.assertEqual(len(probes), 2, "one probe per (CLI, model) pair")
+        self.assertIn("codex exec -m bad --skip-git-repo-check Reply with the word OK.", probes)
+        doc = h.Doctor(self.r.root)  # without --models nothing is probed
+        doc.herdr_state = lambda: None
+        self.stub("probe_model", lambda *a: self.fail("probed without --models"))
+        self.output(doc.run)
 
 
 if __name__ == "__main__":
