@@ -334,14 +334,20 @@ class PureFunctions(unittest.TestCase):
         self.assertTrue(h.valid_pattern("data/*.db"))
         for bad in ("/etc/passwd", "../x", "", ".", 3):
             self.assertFalse(h.valid_pattern(bad), bad)
-        self.assertEqual(h.agent_cli_args({"kind": "claude"}), [])
-        self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}), ["--", "--model", "m", "-x"])
-        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}), ["--", "--effort", "xhigh"])
+        repo = Path("/r")
+        self.assertEqual(h.agent_cli_args({"kind": "claude"}, repo), [])
+        self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}, repo), ["--", "--model", "m", "-x"])
+        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}, repo), ["--", "--effort", "xhigh"])
         self.assertEqual(
-            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}),
+            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}, repo),
             ["--", "--model", "g", "-c", "model_reasoning_effort=high", "-y"],
         )
-        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}), [], "no effort setting for pi")
+        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}, repo), [], "no effort setting for pi")
+        self.assertEqual(
+            h.agent_cli_args({"args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}, repo),
+            ["--", "--add-dir", "/r/.git", "-c", "x={a}"],
+            "{repo} is the main checkout; other braces stay as written",
+        )
         self.assertEqual(
             h.role_prompt("reviewer", "s", " a\n b "),
             "Read harness/roles/reviewer.md and follow it for harness/features/s/. a b",
@@ -1111,6 +1117,11 @@ class HerdrAdapter(Case):
         self.assertEqual(len(prompts), 2, "the first prompt finds no agent; the second follows the start")
         self.assertEqual(prompts[-1], ["agent", "prompt", "impl-feat", "do it", "--wait", "--timeout", "1000"])
 
+    def test_repo_placeholder_is_the_main_checkout(self):
+        acfg = {"kind": "codex", "args": ["--add-dir", "{repo}/.git"]}
+        h.prompt_or_start(self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, acfg)  # from inside the worktree
+        self.assertEqual(self.calls("agent", "start")[0][-2:], ["--add-dir", f"{self.r.root.resolve()}/.git"])
+
     def test_startup_dialogs_are_answered(self):
         self.state.update(start_status="blocked", screen="Do you trust this folder? (y/n)")
         self.save_state()
@@ -1236,7 +1247,7 @@ class HerdrAdapter(Case):
     def test_start_detached_prompts_the_orchestrator(self):
         res = {"root_pane": {"pane_id": "w9:p1"}, "tab": {"tab_id": "w9:t1"}}
         self.r.write_cfg(agents={**AGENTS, "orchestrator": self.ACFG})
-        _, out = self.output(h.start_detached, self.r.cfg(), "feat", res)
+        _, out = self.output(h.start_detached, self.r.root, self.r.cfg(), "feat", res)
         self.assertEqual(self.calls("tab", "rename"), [["tab", "rename", "w9:t1", "orchestrator"]])
         self.assertEqual(
             self.calls("agent", "start")[0][2:8], ["feat", "--kind", "claude", "--pane", "w9:p1", "--timeout"]

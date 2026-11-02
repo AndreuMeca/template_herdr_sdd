@@ -27,7 +27,7 @@ has no model and no cost.
 | `kind` | yes | a herdr agent kind (`herdr agent start --help` lists them): `claude`, `codex`, `pi`, `gemini`, `opencode`, ... | The CLI herdr starts, installed and logged in. It picks the provider; `pi` and `opencode` take it in the model string. |
 | `model` | no | a model id the CLI accepts, or `""` | Passed as `--model`; empty = the CLI's default. |
 | `effort` | no | `claude`: `low`, `medium`, `high`, `xhigh`, `max`. `codex`: `minimal`, `low`, `medium`, `high`, `xhigh`. Or `""` | The reasoning effort, translated per CLI (`--effort` for Claude Code, `-c model_reasoning_effort=` for Codex). Empty = the CLI's default. Ignored for other CLIs; `config` says so. |
-| `args` | no | list of strings | Extra flags, verbatim. Role agents need the non-interactive permission flag or they stop at the first dialog. |
+| `args` | no | list of strings | Extra flags, verbatim, except that `{repo}` becomes the main checkout's absolute path (so the file stays the same on every machine). Role agents need the non-interactive permission flag or they stop at the first dialog. |
 
 herdr only passes model and flags through; check `<cli> --help`. The launcher answers Claude Code's
 two startup dialogs (trust folder, bypass-permissions warning) itself; any other dialog is reported.
@@ -36,15 +36,17 @@ Ready-to-copy entries:
 ```json
 { "kind": "claude", "model": "claude-sonnet-5-5", "args": ["--dangerously-skip-permissions"] }
 { "kind": "claude", "model": "claude-opus-5-5",   "args": ["--permission-mode", "acceptEdits"] }
-{ "kind": "codex",  "model": "",                  "args": ["--ask-for-approval", "never", "--sandbox", "workspace-write"] }
+{ "kind": "codex",  "model": "",                  "args": ["--sandbox", "workspace-write", "--ask-for-approval", "never", "--add-dir", "{repo}/.git"] }
 { "kind": "pi",     "model": "anthropic/claude-sonnet-5-5", "args": [] }
 ```
 `--permission-mode acceptEdits` still asks before shell commands: fine for a detached orchestrator you
-watch, not for roles. Codex's `--dangerously-bypass-approvals-and-sandbox` also drops the sandbox; only
-on a disposable machine. With `--sandbox workspace-write` instead, Codex cannot commit inside a feature
-worktree (the worktree's git dir lives in the main checkout): add `--add-dir <repo>/.git` to its `args`,
-or the driver stops at the merge gate with "uncommitted changes left behind". pi never asks. Other CLIs are unverified; put their non-interactive flag
-(Gemini CLI: `--yolo`) in `args`.
+watch, not for roles. Codex with `--sandbox workspace-write` (the shipped reviewer) writes only inside its
+worktree plus the dirs given with `--add-dir`. It needs `{repo}/.git` there, because a worktree's git dir
+lives in the main checkout; without it Codex cannot commit and the driver stops at the merge gate with
+"uncommitted changes left behind". Codex's `--dangerously-bypass-approvals-and-sandbox` drops the sandbox
+altogether: only on a disposable machine. pi never asks. Other CLIs are unverified; put their
+non-interactive flag (Gemini CLI: `--yolo`) in `args`. What a permission flag means for the harness:
+`harness/docs/sdd.md` §9.
 
 ## herdr's sidebar
 

@@ -42,7 +42,12 @@
       "model": "gpt-6-astra",
       "effort": "xhigh",
       "args": [
-        "--dangerously-bypass-approvals-and-sandbox"
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "--add-dir",
+        "{repo}/.git"
       ]
     }
   }
