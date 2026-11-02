@@ -6,6 +6,7 @@
 """SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/run/wait/drive/merge also need herdr.
 
   harness.py config                        the setup in a few lines: roles, models, gates, commands (anyone)
+                     [--apply]             ... and write the orchestrator's model/permissions for Claude Code (human)
   harness.py status                        board across every worktree, grouped by whose move it is (anyone)
   harness.py start <slug> ["intent"]       new worktree + branch + feature folder (orchestrator or human, base branch)
                      [--detach]            ... plus a dedicated orchestrator agent in it
@@ -265,13 +266,17 @@ def claude_settings(acfg: dict) -> dict:
     return out
 
 
-def write_local_settings(root: Path, cfg: Config) -> str:
-    """Keep .claude/settings.local.json (per machine, gitignored) in step with agents.orchestrator, so the Claude
-    the human opens in this repo starts with that model and permission mode. Other keys in the file are kept.
-    Returns one report line."""
+NOT_CLAUDE = "orchestrator is not Claude Code: .claude/settings.local.json left alone"
+APPLY_CMD = "uv run harness/harness.py config --apply"
+
+
+def local_settings(root: Path, cfg: Config) -> tuple[Path, dict, dict, str] | None:
+    """(path, current, wanted, summary) of .claude/settings.local.json (per machine, gitignored) against
+    agents.orchestrator, so the Claude the human opens in this repo starts with that model and permission mode.
+    Other keys in the file are kept. None when the orchestrator is not Claude Code."""
     acfg = cfg.agents["orchestrator"]
     if acfg["kind"] != "claude":
-        return "orchestrator is not Claude Code: .claude/settings.local.json left alone"
+        return None
     want = claude_settings(acfg)
     p = root / ".claude" / "settings.local.json"
     try:
@@ -283,6 +288,30 @@ def write_local_settings(root: Path, cfg: Config) -> str:
     if "model" in want:
         new["model"] = want["model"]
     what = f"model {want.get('model', '(Claude Code default)')}, permissions {want['permissions']['defaultMode']}"
+    return p, current, new, what
+
+
+def settings_report(root: Path, cfg: Config) -> str:
+    """One read-only line: is .claude/settings.local.json in step with agents.orchestrator? Never writes: raising
+    the permissions of the next session is the human's call (`config --apply`), not an agent's."""
+    s = local_settings(root, cfg)
+    if s is None:
+        return NOT_CLAUDE
+    _, current, new, what = s
+    if new == current:
+        return f"Claude Code in this repo: {what} (in step with .claude/settings.local.json)"
+    return (
+        f"Claude Code in this repo should run with {what}, which .claude/settings.local.json does not say yet; "
+        f"to apply, run yourself: {APPLY_CMD}, then restart Claude Code"
+    )
+
+
+def write_local_settings(root: Path, cfg: Config) -> str:
+    """`config --apply`: write .claude/settings.local.json from agents.orchestrator. Returns one report line."""
+    s = local_settings(root, cfg)
+    if s is None:
+        return NOT_CLAUDE
+    p, current, new, what = s
     if new == current:
         return f"Claude Code in this repo: {what} (.claude/settings.local.json unchanged)"
     p.parent.mkdir(exist_ok=True)
@@ -740,10 +769,11 @@ def effort_args(kind: str, effort: str) -> list:
     return [part.format(effort) for part in EFFORTS[kind][0]]
 
 
-def agent_cli_args(a: dict) -> list:
+def agent_cli_args(a: dict, repo: Path) -> list:
+    """The CLI flags after `--`; `{repo}` in an arg becomes the main checkout's absolute path."""
     model = ["--model", a["model"]] if a.get("model") else []
     effort = effort_args(a.get("kind", ""), a.get("effort", ""))
-    extra = list(a.get("args") or [])
+    extra = [str(x).replace("{repo}", str(repo)) for x in a.get("args") or []]
     return ["--", *model, *effort, *extra] if (model or effort or extra) else []
 
 
@@ -795,7 +825,7 @@ def settle_startup(name: str, timeout_s: int = 60) -> bool:
     return agent_state(name) in ("idle", "done")
 
 
-def start_agent(name: str, acfg: dict, pane_id: str, tries: int = 1) -> bool:
+def start_agent(name: str, acfg: dict, pane_id: str, repo: Path, tries: int = 1) -> bool:
     """Start a role or orchestrator agent in a pane; True when it is up (or already reported as not ready yet)."""
     for attempt in range(tries):  # a new pane's shell may need a moment to reach its prompt
         try:
@@ -809,7 +839,7 @@ def start_agent(name: str, acfg: dict, pane_id: str, tries: int = 1) -> bool:
                 pane_id,
                 "--timeout",
                 120_000,
-                *agent_cli_args(acfg),
+                *agent_cli_args(acfg, repo),
             )
             return True
         except HerdrError as e:
@@ -839,7 +869,7 @@ def prompt_or_start(
                 pane_id = find_key(tab.get("root_pane", tab), "pane_id") or die(
                     f"tab create returned no pane_id: {tab}"
                 )
-                if not start_agent(name, acfg, pane_id):
+                if not start_agent(name, acfg, pane_id, main_checkout(root)):
                     raise
                 if not settle_startup(name):
                     return True, "blocked at startup"
@@ -1375,6 +1405,9 @@ class Doctor:
                 self.notes.append(f"copy_files: {pat} is not in the main checkout, so new worktrees will not get it")
         for line in bad:
             self.check(False, f".worktreeinclude line rejected: {line}", "relative paths only, no '..'")
+        report = settings_report(self.root, cfg)
+        if APPLY_CMD in report:
+            self.notes.append(report)
 
     def git_leftovers(self, base: str):
         root = self.root
@@ -1471,7 +1504,7 @@ def cmd_config(a):
         missing = "" if shutil.which(kind) else "   <- not in PATH"
         note = "   (only used by start --detach)" if role == "orchestrator" else ""
         print(f"  {role:<18} {kind:<7} {model:<28} effort {effort:<7} {args}{missing}{note}")
-    print(write_local_settings(root, cfg))
+    print(write_local_settings(root, cfg) if a.apply else settings_report(root, cfg))
     print("edit harness/config.json (keys: harness/help/config.md); the launcher validates it on every command")
     return 0
 
@@ -1597,7 +1630,7 @@ def prepare_worktree(root: Path, wt: Path, cfg: Config):
         print("setup_cmd:", "ok" if code == 0 else f"FAILED (exit {code}); fix it in the worktree\n{out[-800:]}")
 
 
-def start_detached(cfg: Config, slug: str, res: dict):
+def start_detached(root: Path, cfg: Config, slug: str, res: dict):
     """A dedicated orchestrator agent in the worktree's root pane, prompted with its role."""
     acfg = cfg.agents["orchestrator"]
     pane_id = res["root_pane"]["pane_id"]
@@ -1606,7 +1639,7 @@ def start_detached(cfg: Config, slug: str, res: dict):
         with contextlib.suppress(HerdrError):
             herdr("tab", "rename", tab_id, "orchestrator")
     text = f"Read harness/roles/orchestrator.md and follow it for harness/features/{slug}/."
-    started = start_agent(slug, acfg, pane_id, tries=3)
+    started = start_agent(slug, acfg, pane_id, root, tries=3)
     if started and not settle_startup(slug):
         print(
             "warning: the orchestrator is blocked on a dialog; look at it: "
@@ -1632,12 +1665,11 @@ def cmd_start(a):
     wt = Path(res["worktree"]["path"])
     seed_feature(wt, a.slug, a.intent)
     prepare_worktree(root, wt, cfg)
-    write_local_settings(root, cfg)
     sidebar(wt, state_text("pending", "", cfg.gates))
     ws_id = res["workspace"]["workspace_id"]
     print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")
     if a.detach:
-        start_detached(cfg, a.slug, res)
+        start_detached(root, cfg, a.slug, res)
     else:
         print(f"next: harness.py drive {a.slug} --tab   (or one role at a time: harness.py run spec_author {a.slug})")
     return 0
@@ -1804,9 +1836,13 @@ def main(argv=None) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("config", help="the setup in a few lines: roles, models, gates, commands").set_defaults(
-        fn=cmd_config
+    s = sub.add_parser("config", help="the setup in a few lines: roles, models, gates, commands (read-only)")
+    s.add_argument(
+        "--apply",
+        action="store_true",
+        help="also write the orchestrator's model and permission mode to .claude/settings.local.json (human only)",
     )
+    s.set_defaults(fn=cmd_config)
     sub.add_parser("status", help="board across every worktree").set_defaults(fn=cmd_status)
 
     s = sub.add_parser("start", help="new worktree + branch + feature folder (orchestrator or human, base branch)")

@@ -9,6 +9,8 @@ every agent reads; the rest of the repo is your project.
 - git and [uv](https://docs.astral.sh/uv/) (the launcher is stdlib-only Python; `python3 harness/harness.py` also works)
 - [herdr](https://herdr.dev/docs/install/): `curl -fsSL https://herdr.dev/install.sh | sh`
 - The agent CLIs named in `harness/config.json`, logged in
+- A read of the trust model, `harness/docs/sdd.md` §9: role agents run with the permissions you give them
+  in `config.json`, and the harness's checks catch mistakes, not a hostile agent
 
 ## New project
 1. `git clone <this repo> myproject && cd myproject && rm -rf .git && git init -b main`
@@ -17,10 +19,12 @@ every agent reads; the rest of the repo is your project.
    key is explained in `harness/help/config.md`.
 4. Add your code outside `harness/`, commit, open the repo in herdr, start your agent and ask for a
    feature. `uv run harness/harness.py doctor` checks tools and config. The Claude you open in this
-   repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `config`
-   and `start` write them to `.claude/settings.local.json` (per machine, not committed), so with
+   repo starts with the model and permission mode of `agents.orchestrator` in `config.json`: `config
+   --apply` writes them to `.claude/settings.local.json` (per machine, not committed), so with
    `--dangerously-skip-permissions` in its args the orchestrator never stops to ask (accept Claude
-   Code's one-time warning). Run `uv run harness/harness.py config` once after cloning, then start Claude.
+   Code's one-time warning). Run `uv run harness/harness.py config --apply` once after cloning and after
+   every change to `agents.orchestrator`, then start Claude. Plain `config` only shows the setup, and the
+   agent is denied `--apply` (`.claude/settings.json`), so it cannot raise its own permissions.
 
 ## Daily flow
 You, to the agent on `main`: "Build email+password login with a cookie session." It runs `start login`

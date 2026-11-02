@@ -334,14 +334,20 @@ class PureFunctions(unittest.TestCase):
         self.assertTrue(h.valid_pattern("data/*.db"))
         for bad in ("/etc/passwd", "../x", "", ".", 3):
             self.assertFalse(h.valid_pattern(bad), bad)
-        self.assertEqual(h.agent_cli_args({"kind": "claude"}), [])
-        self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}), ["--", "--model", "m", "-x"])
-        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}), ["--", "--effort", "xhigh"])
+        repo = Path("/r")
+        self.assertEqual(h.agent_cli_args({"kind": "claude"}, repo), [])
+        self.assertEqual(h.agent_cli_args({"model": "m", "args": ["-x"]}, repo), ["--", "--model", "m", "-x"])
+        self.assertEqual(h.agent_cli_args({"kind": "claude", "effort": "xhigh"}, repo), ["--", "--effort", "xhigh"])
         self.assertEqual(
-            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}),
+            h.agent_cli_args({"kind": "codex", "model": "g", "effort": "high", "args": ["-y"]}, repo),
             ["--", "--model", "g", "-c", "model_reasoning_effort=high", "-y"],
         )
-        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}), [], "no effort setting for pi")
+        self.assertEqual(h.agent_cli_args({"kind": "pi", "effort": "high"}, repo), [], "no effort setting for pi")
+        self.assertEqual(
+            h.agent_cli_args({"args": ["--add-dir", "{repo}/.git", "-c", "x={a}"]}, repo),
+            ["--", "--add-dir", "/r/.git", "-c", "x={a}"],
+            "{repo} is the main checkout; other braces stay as written",
+        )
         self.assertEqual(
             h.role_prompt("reviewer", "s", " a\n b "),
             "Read harness/roles/reviewer.md and follow it for harness/features/s/. a b",
@@ -992,13 +998,43 @@ class Commands(Case):
             "reviewer": {"kind": "pi", "effort": "high"},
         }
         self.r.write_cfg(gates={"approve": "auto"}, agents=agents)
-        code, out = self.output(h.cmd_config, Namespace())
+        code, out = self.output(h.cmd_config, Namespace(apply=False))
         self.assertEqual(code, 0)
         self.assertIn("gates              approve: auto   merge: human", out)
         self.assertIn("implementer        codex   (default model)              effort xhigh   -x", out)
         self.assertIn("effort high (ignored: no effort setting for this CLI)", out)
         self.assertIn("(only used by start --detach)", out)
         self.assertIn("copy_files         .env", out)
+
+    def test_config_shows_and_only_apply_writes_the_settings(self):
+        self.chdir(self.r.root)
+        p = self.r.root / ".claude" / "settings.local.json"
+        orch = {"kind": "claude", "model": "m", "args": ["--dangerously-skip-permissions"]}
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": orch})
+        _, out = self.output(h.cmd_config, Namespace(apply=False))
+        self.assertFalse(p.exists(), "plain config never writes: raising permissions is the human's call")
+        self.assertIn("model m, permissions bypassPermissions, which .claude/settings.local.json does not say", out)
+        self.assertIn("run yourself: uv run harness/harness.py config --apply, then restart Claude Code", out)
+        _, out = self.output(h.cmd_config, Namespace(apply=True))
+        self.assertIn("updated; restart Claude Code", out)
+        self.assertEqual(json.loads(p.read_text())["permissions"]["defaultMode"], "bypassPermissions")
+        _, out = self.output(h.cmd_config, Namespace(apply=False))
+        self.assertIn("(in step with .claude/settings.local.json)", out)
+
+    def test_start_leaves_the_claude_settings_alone(self):
+        self.chdir(self.r.root)
+        self.r.write_cfg(agents={**AGENTS, "orchestrator": {"kind": "claude", "model": "m"}})
+
+        def create(root, slug, base, trust):
+            path = self.r.tmp / "wt-new"
+            self.r.git("worktree", "add", "-q", "-b", slug, str(path), base)
+            return {"worktree": {"path": str(path)}, "workspace": {"workspace_id": "w9"}}
+
+        self.stub("create_worktree", create)
+        code, _ = self.output(h.cmd_start, Namespace(slug="newf", intent="do y", trust=False, detach=False))
+        self.assertEqual(code, 0)
+        self.assertTrue((self.r.tmp / "wt-new" / "harness" / "features" / "newf" / "spec.md").exists())
+        self.assertFalse((self.r.root / ".claude" / "settings.local.json").exists())
 
     def test_check_command_finds_the_worktree(self):
         self.chdir(self.r.root)
@@ -1110,6 +1146,11 @@ class HerdrAdapter(Case):
         prompts = self.calls("agent", "prompt")
         self.assertEqual(len(prompts), 2, "the first prompt finds no agent; the second follows the start")
         self.assertEqual(prompts[-1], ["agent", "prompt", "impl-feat", "do it", "--wait", "--timeout", "1000"])
+
+    def test_repo_placeholder_is_the_main_checkout(self):
+        acfg = {"kind": "codex", "args": ["--add-dir", "{repo}/.git"]}
+        h.prompt_or_start(self.r.wt, self.r.wt, "reviewer", "feat", "do it", 1000, acfg)  # from inside the worktree
+        self.assertEqual(self.calls("agent", "start")[0][-2:], ["--add-dir", f"{self.r.root.resolve()}/.git"])
 
     def test_startup_dialogs_are_answered(self):
         self.state.update(start_status="blocked", screen="Do you trust this folder? (y/n)")
@@ -1236,7 +1277,7 @@ class HerdrAdapter(Case):
     def test_start_detached_prompts_the_orchestrator(self):
         res = {"root_pane": {"pane_id": "w9:p1"}, "tab": {"tab_id": "w9:t1"}}
         self.r.write_cfg(agents={**AGENTS, "orchestrator": self.ACFG})
-        _, out = self.output(h.start_detached, self.r.cfg(), "feat", res)
+        _, out = self.output(h.start_detached, self.r.root, self.r.cfg(), "feat", res)
         self.assertEqual(self.calls("tab", "rename"), [["tab", "rename", "w9:t1", "orchestrator"]])
         self.assertEqual(
             self.calls("agent", "start")[0][2:8], ["feat", "--kind", "claude", "--pane", "w9:p1", "--timeout"]

@@ -13,14 +13,16 @@
 
 ## 3. Your role
 - Your prompt names a file in `harness/roles/`: that file is your job. Read it, then `harness/docs/sdd.md`.
-- Otherwise you are the orchestrator, the agent the human talks to. Before anything else in a session,
-  once: run `uv run harness/harness.py config`, show its output together with the model you are running
-  as, ask the human whether this is the setup they want, and wait for the answer (they may ask you to
-  change it: `harness/roles/orchestrator.md` says how). Then follow `harness/roles/orchestrator.md`.
-- You are meant to run as `agents.orchestrator` in `harness/config.json` says (model, permissions):
-  `config` writes that into `.claude/settings.local.json`, which Claude Code reads when a session starts.
-  When `config` reports that file as updated, or you are being asked for permissions you should not be
-  asked for, say so and ask the human to restart Claude Code in this repo before going on.
+- Otherwise you are the orchestrator, the agent the human talks to: follow `harness/roles/orchestrator.md`.
+  Before your first `start` or `drive` in a session (not for questions, reviews or trivial changes), once:
+  run `uv run harness/harness.py config` (read-only), show its output together with the model you are
+  running as, ask the human whether this is the setup they want, and wait for the answer (they may ask
+  you to change it: `harness/roles/orchestrator.md` says how).
+- You are meant to run as `agents.orchestrator` in `harness/config.json` says (model, permissions).
+  Only the human writes that into `.claude/settings.local.json`, which Claude Code reads when a session
+  starts: when `config` says the file does not match yet, or you are being asked for permissions you
+  should not be asked for, ask them to run `! uv run harness/harness.py config --apply` and restart
+  Claude Code in this repo. Never run `config --apply` yourself.
 
 ## 4. Where things are
 - Rules, lifecycle, what `check` enforces: `harness/docs/sdd.md`

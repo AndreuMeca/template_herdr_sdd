@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(uv run harness/harness.py:*)"
+    ],
+    "deny": [
+      "Bash(uv run harness/harness.py config --apply:*)"
     ]
   }
 }

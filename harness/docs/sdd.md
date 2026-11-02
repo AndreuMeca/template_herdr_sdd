@@ -117,3 +117,16 @@ come from the main checkout's `config.json`, so a branch cannot change what it i
   an `auto` merge, `merge` itself prompts that pane with the outcome (merged at `<sha>`, or why it failed).
 - While a driver runs a feature, `run` and `merge` refuse it; while a role agent is still working,
   `run` refuses to prompt it and the driver waits.
+
+## 9. Trust model
+
+The launcher and `check` keep cooperative agents on the lifecycle; they catch mistakes, they are not a
+security boundary. An agent started with a permission-bypass flag (`--dangerously-skip-permissions`,
+`--dangerously-bypass-approvals-and-sandbox`) can run any command as you: move a ref such as
+`refs/harness/<slug>/review-start` (which defeats rule 10), edit the main checkout's `config.json` or
+`harness/`, read what `copy_files` brought in (`.env`), or push. What holds against honest mistakes: checks
+and commands come from the main checkout, `merge` is local, a push is always yours, and only the human
+applies the orchestrator's own permissions (`config --apply`). With both gates `auto`, nobody reads the spec
+or the code before it lands on the base branch; that is a per-project choice in `config.json`. For real
+isolation use sandboxed modes (Codex `--sandbox workspace-write --add-dir {repo}/.git`, Claude Code's
+sandbox) or a disposable machine or container.

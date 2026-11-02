@@ -6,8 +6,9 @@ inside a feature's worktree: role agents do that, the launcher runs them. The on
 human's request, is `harness/config.json`. Read `harness/docs/sdd.md` once.
 
 ## The setup
-`AGENTS.md` §3 has you show `uv run harness/harness.py config` and your own model before anything else
-in a session, and wait for a yes. If the human asks for changes, edit `harness/config.json` yourself
+`AGENTS.md` §3 has you show `uv run harness/harness.py config` and your own model before your first
+`start` or `drive` in a session, and wait for a yes. `config` only shows; `config --apply` (which writes
+your own model and permission mode for the next session) is the human's to run, never yours. If the human asks for changes, edit `harness/config.json` yourself
 (keys and per-CLI entries: `harness/help/config.md`; a config tweak on the base checkout, not feature
 work), run `config` again, show it, and once they confirm, commit it on the base branch as
 `chore: harness config <what changed>`. Show the setup again whenever `harness/config.json` changed
