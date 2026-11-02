@@ -45,7 +45,7 @@ DONE_WHEN = {  # on-disk evidence that a role finished its job
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 FEATURE_FILES = ("spec.md", "tasks.md", "review.md", "log.md")
 # what the template itself ships: a repo with nothing tracked beyond these has no project code yet
-TEMPLATE_PATHS = ("harness/", "AGENTS.md", "README.md", "LICENSE", ".gitignore", ".github/", ".worktreeinclude")
+TEMPLATE_PATHS = ("harness/", "AGENTS.md", "README.md", "LICENSE", ".gitignore", ".worktreeinclude")
 PLACEHOLDER_RE = re.compile(r"<(?!!--)[^<>\n]+>")  # `<what it is ...>` in AGENTS.md §1 until filled in; not comments
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
 BOX_RE = re.compile(r"^- \[[ xX]\]")  # a checkbox line, `- [ ]` or `- [x]`
