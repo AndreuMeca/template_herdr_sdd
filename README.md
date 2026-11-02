@@ -29,8 +29,8 @@ every agent reads; the rest of the repo is your project.
 
 ## Daily flow
 You, to the agent on `main`: "Build email+password login with a cookie session." It runs `start login`
-(worktree, branch, `harness/features/login/`, nested workspace) and `drive login --tab`, and is free
-again. The driver runs the spec author, implementer and reviewer in their own tabs, merges `main` in and
+(worktree, branch, `harness/features/login/`, nested workspace, and the driver in its own tab), and is
+free again. The driver runs the spec author, implementer and reviewer in their own tabs, merges `main` in and
 tests before every review, and sends failures back. With the shipped config (`gates` set to `human`) it
 stops twice, for you to read the spec and to merge, and prompts your agent with `harness: login ...`:
 ```

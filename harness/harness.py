@@ -6,7 +6,7 @@
 """SDD harness launcher on herdr. Python 3 stdlib only. Needs git; start/drive/merge also need herdr.
 
   harness.py status                        board across every worktree, grouped by whose move it is (anyone)
-  harness.py start <slug> ["intent"]       new worktree + branch + feature folder (orchestrator or human, base branch)
+  harness.py start <slug> ["intent"]       new worktree + branch + feature folder, then drive --tab (base branch)
   harness.py drive <slug> ["msg"] --tab    run the whole loop in a `driver` tab until a human is needed (orchestrator)
   harness.py approve <slug>                approve a spec; the driver continues            (human)
   harness.py merge <slug>                  merge an approved, reviewed feature          (human, base branch)
@@ -54,7 +54,7 @@ TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
 EARS_RE = re.compile(r"^(?:(?:WHILE|WHEN|WHERE) .+?, )*(?:IF .+?, THEN )?THE \S.*? SHALL \S")
 EARS_HINT = "THE ... SHALL / WHEN|WHILE|WHERE ..., THE ... SHALL / IF ..., THEN THE ... SHALL"
 # the example placeholders of harness/features/_template/: a requirement or task still holding one was never written
-TEMPLATE_PLACEHOLDERS = ("<trigger>", "<response>", "<unwanted condition>", "<task>")
+TEMPLATE_PLACEHOLDERS = ("<trigger>", "<response>", "<unwanted condition>", "<task>", "<test file>")
 EXIT_DONE, EXIT_ERROR, EXIT_ATTENTION = 0, 1, 2
 DRIVE_WAIT_MS = 300_000  # the driver waits for a role in slices of this length
 DEFAULT_ROLE_MINUTES = 180  # the driver stops for a human when one role run takes longer (max_role_minutes)
@@ -1243,8 +1243,9 @@ class Checker:
         rows, errs = self.files.verification(), []
         for r in sorted(active, key=lambda x: int(x[1:])):
             files = rows.get(r)
-            if not files:
-                errs.append(f"{self.slug}: {r} has no test file in ## Verification")
+            unfilled = self.placeholders([(f"{r} in ## Verification", " ".join(files or []))])
+            if not files or unfilled:
+                errs += unfilled or [f"{self.slug}: {r} has no test file in ## Verification"]
                 continue
             grep = ("grep", "--untracked", "-q", "-E", self.token_pattern(self.slug, r), "--", *files)
             if at_review and not self.git.ok(*grep):
@@ -1933,7 +1934,21 @@ def cmd_start(a):
     HERDR.sidebar(wt, state_text("pending", "", cfg.gates))
     ws_id = res["workspace"]["workspace_id"]
     print(f"worktree: {wt}\nworkspace: {ws_id}  branch: {a.slug}  feature: harness/features/{a.slug}/")
-    print(f"next: harness.py drive {a.slug} --tab")
+    try:
+        return drive_in_tab(root, wt, a.slug, "")
+    except HerdrError as e:
+        die(f"herdr {e.code}: {e.message}\nthe feature exists; start its driver: harness.py drive {a.slug} --tab")
+
+
+def drive_in_tab(root: Path, wt: Path, slug: str, msg: str) -> int:
+    """Run the driver in the `driver` tab of the feature's workspace; it prompts this pane when it stops."""
+    pane = HERDR.launch_driver(Git(root).main_checkout(), wt, slug, msg, os.environ.get("HERDR_PANE_ID", ""))
+    print(
+        f"driver for {slug}: pane {pane}, tab 'driver' of its workspace. It runs the roles one after another "
+        "and stops when the feature needs a human; then it prompts this pane (if an agent runs here) "
+        "and `status` says what to do."
+    )
+    print(f"watch: herdr pane read {pane} --lines 40")
     return 0
 
 
@@ -1960,14 +1975,7 @@ def cmd_drive(a):
     if pid:
         die(f"a driver (pid {pid}) is already running {a.slug}")
     if a.tab:
-        pane = HERDR.launch_driver(Git(root).main_checkout(), f.wt, a.slug, a.msg, os.environ.get("HERDR_PANE_ID", ""))
-        print(
-            f"driver for {a.slug}: pane {pane}, tab 'driver' of its workspace. It runs the roles one after another "
-            "and stops when the feature needs a human; then it prompts this pane (if an agent runs here) "
-            "and `status` says what to do."
-        )
-        print(f"watch: herdr pane read {pane} --lines 40")
-        return 0
+        return drive_in_tab(root, f.wt, a.slug, a.msg)
     return Driver(root, cfg, f, a.msg, a.notify).run()
 
 
@@ -2052,7 +2060,7 @@ def main(argv=None) -> int:
 
     sub.add_parser("status", help="board across every worktree").set_defaults(fn=cmd_status)
 
-    s = sub.add_parser("start", help="new worktree + branch + feature folder (orchestrator or human, base branch)")
+    s = sub.add_parser("start", help="new worktree + branch + feature folder, then drive --tab (base branch)")
     s.add_argument("slug")
     s.add_argument("intent", nargs="?", default="")
     s.add_argument(

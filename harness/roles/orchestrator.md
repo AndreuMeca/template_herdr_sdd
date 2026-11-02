@@ -25,10 +25,9 @@ When `doctor` notes that `AGENTS.md` §1 is not filled in, settle it in the same
   base branch as `chore: project section`. Same lane as a config tweak: no feature, no worktree.
 
 ## A feature request
-1. `uv run harness/harness.py start <slug> "<what it must do>"`. Slug: short, lowercase, dashes. Ask
-   first if the intent is unclear.
-2. `uv run harness/harness.py drive <slug> --tab`. Tell the human it is running, then STOP. You are
-   free; several features may run at once.
+`uv run harness/harness.py start <slug> "<what it must do>"`: it creates the feature and starts its
+driver. Slug: short, lowercase, dashes. Ask first if the intent is unclear. Tell the human it is
+running, then STOP. You are free; several features may run at once.
 
 ## The board
 `uv run harness/harness.py status` groups features by whose move it is:
