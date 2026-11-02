@@ -447,6 +447,12 @@ class ConfigTests(Case):
             h.Config.load(self.r.wt).test_cmd, "true", "config comes from the main checkout, not the branch"
         )
 
+    def test_shipped_config_is_the_safe_default(self):
+        cfg = h.Config.parse(json.loads((HERE / "config.json").read_text()), HERE / "config.json")
+        self.assertEqual(cfg.gates, {"approve": "human", "merge": "human"}, "a stranger's clone stops at both gates")
+        for role in h.ROLES:
+            self.assertEqual((cfg.agent(role).permissions, cfg.agent(role).model), ("guarded", ""), role)
+
     def test_rejects_bad_files(self):
         bad = [
             {"test_cmd": "true", "agents": AGENTS},
@@ -1482,6 +1488,51 @@ class HerdrAdapter(Case):
 
 
 class DoctorChecks(Case):
+    def test_an_empty_project_is_not_a_red_baseline(self):
+        self.r.git("rm", "-r", "-q", "src", "tests")
+        self.r.commit("only the template")
+        self.assertEqual(h.Git(self.r.root).project_paths(), set())
+        self.r.write_cfg(test_cmd="false", setup_cmd="touch setup-ran")
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertEqual((out, doc.problems), ("", []))
+        self.assertIn("no project code yet", doc.notes[0])
+        dst = self.r.tmp / "new-wt"
+        dst.mkdir()
+        _, out = self.output(h.WorktreeSetup(self.r.root, dst, self.r.cfg()).run)
+        self.assertIn("setup_cmd: skipped (no project code yet", out)
+        self.assertFalse((dst / "setup-ran").exists())
+        (self.r.root / "main.go").write_text("package main\n")  # any file outside the template's is project code
+        self.r.commit("first code")
+        self.assertEqual(h.Git(self.r.root).project_paths(), {"main.go"})
+        _, out = self.output(h.WorktreeSetup(self.r.root, dst, self.r.cfg()).run)
+        self.assertIn("setup_cmd: ok", out)
+        self.assertTrue((dst / "setup-ran").exists())
+        doc = h.Doctor(self.r.root)
+        _, out = self.output(doc.baseline, self.r.cfg())
+        self.assertIn("FAIL  test_cmd green on the main checkout (false)", out)
+
+    def test_project_section_placeholders(self):
+        agents_md = self.r.root / "AGENTS.md"
+        doc = h.Doctor(self.r.root)
+        doc.project_section()
+        self.assertEqual(doc.notes, [], "no AGENTS.md: nothing to say")
+        shipped = (HERE.parent / "AGENTS.md").read_text()
+        agents_md.write_text(shipped)
+        doc.project_section()
+        self.assertEqual(len(doc.notes), 1)
+        self.assertIn("AGENTS.md §1 is not filled in yet", doc.notes[0])
+        start, end = shipped.index("## 1."), shipped.index("## 2.")
+        filled = (
+            "## 1. Project\n<!-- Filled in by the orchestrator with the human before the first feature. -->\n"
+            "- What it is: a CLI that renames photos by date\n- Stack and layout: Go, cmd/ and internal/\n"
+            "- Conventions: gofmt; errors wrapped with %w\n\n"
+        )
+        agents_md.write_text(shipped[:start] + filled + shipped[end:])
+        doc = h.Doctor(self.r.root)
+        doc.project_section()
+        self.assertEqual(doc.notes, [], "filled in; the HTML comment and later sections do not count")
+
     def test_baseline_runs_test_cmd_unless_skipped(self):
         self.r.write_cfg(test_cmd="echo boom; false")
         doc = h.Doctor(self.r.root)

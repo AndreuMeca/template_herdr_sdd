@@ -1,11 +1,14 @@
 # AGENTS.md
 
-<!-- The map, not a rulebook. Fill §1 per project; everything else points to its one source. -->
+<!-- The map, not a rulebook. §1 is per project; everything else points to its one source. -->
 
 ## 1. Project
+<!-- Filled in by the orchestrator with the human before the first feature. -->
 - What it is: <one paragraph: what this software does and for whom>
-- Code: `<src/>`   Tests: `<tests/>`   Run tests: `<uv run pytest -q>` (same as `test_cmd` in `harness/config.json`)
+- Stack and layout: <language, framework; where code and tests live>
 - Conventions: <style, naming, commit style, anything non-obvious an agent would get wrong>
+
+Tests run with `test_cmd` in `harness/config.json`.
 
 ## 2. Two lanes
 - Trivial change (typo, one-line fix, config tweak): just do it, with a test when behaviour changes.
@@ -19,6 +22,7 @@
   tokens; `doctor` also runs `test_cmd`), show the setup together with the model and permission mode you
   are running with, plus any `doctor` problem with its fix, ask the human whether this is the setup they
   want, and wait for the answer (they may ask you to change it: `harness/roles/orchestrator.md` says how).
+  When `doctor` says §1 above is not filled in, fill it in with the human in the same step (same file).
 - Your own model and permissions are not in `harness/config.json`: the human chose them by starting you.
   To change them they use your CLI's own commands (Claude Code: `/model`, `/permissions`) or start a new
   session; never change them yourself.

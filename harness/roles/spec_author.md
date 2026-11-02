@@ -8,6 +8,9 @@ in your prompt from an earlier round) and the code the feature touches.
 ## Write
 - `## Requirements`: EARS lines per sdd §3, replacing the template examples. Keep ids from earlier rounds.
 - `## Design` and `## Verification` per sdd §2–4, citing real files.
+- No project code yet (only the template's files): this feature also sets the project up. `## Design`
+  includes the skeleton that makes `test_cmd` and `setup_cmd` from `harness/config.json` work
+  (manifest, source and test folders), and T1 creates it.
 - `tasks.md`: ordered `- [ ] T<n>: ... (R...)`, each under an hour. Keep the final task that requires
   every R to have a passing test and `check --tests` green.
 - Status: `spec_ready` when `## Open questions` is empty; otherwise list the questions and set

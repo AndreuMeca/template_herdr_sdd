@@ -51,6 +51,9 @@ DONE_WHEN = {  # on-disk evidence that a role finished its job
 }
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 FEATURE_FILES = ("spec.md", "tasks.md", "review.md", "log.md")
+# what the template itself ships: a repo with nothing tracked beyond these has no project code yet
+TEMPLATE_PATHS = ("harness/", "AGENTS.md", "README.md", "LICENSE", ".gitignore", ".github/", ".worktreeinclude")
+PLACEHOLDER_RE = re.compile(r"<(?!!--)[^<>\n]+>")  # `<what it is ...>` in AGENTS.md §1 until filled in; not comments
 REQ_RE = re.compile(r"^- (R\d+):\s*(.*)$")
 TASK_RE = re.compile(r"^- \[([ xX])\] (T\d+):\s*(.*)$")
 # sdd §3: WHILE/WHEN/WHERE clauses (combinable), an optional `IF ..., THEN`, then `THE <subject> SHALL <response>`
@@ -256,6 +259,10 @@ class Git:
         untracked ones."""
         committed = self.paths("diff", "--name-only", f"{base}...HEAD")
         return sorted(committed | {p for _, p in self.porcelain()})
+
+    def project_paths(self) -> set[str]:
+        """Tracked files that are the project's, not the template's (TEMPLATE_PATHS); empty = no project code yet."""
+        return {p for p in self.paths("ls-files") if not p.startswith(TEMPLATE_PATHS)}
 
     def is_ignored(self, path) -> bool:
         return self.ok("check-ignore", "-q", path)
@@ -492,7 +499,9 @@ class WorktreeSetup:
         if pats or bad:
             line = self.copy_ignored(pats) if pats else "nothing listed"
             print("copy_files:", line + (f"; rejected .worktreeinclude lines: {', '.join(bad)}" if bad else ""))
-        if self.cfg.setup_cmd:
+        if self.cfg.setup_cmd and not Git(self.root).project_paths():
+            print("setup_cmd: skipped (no project code yet; the first feature sets it up)")
+        elif self.cfg.setup_cmd:
             code, out = shell(self.cfg.setup_cmd, self.wt)
             print("setup_cmd:", "ok" if code == 0 else f"FAILED (exit {code}); fix it in the worktree\n{out[-800:]}")
 
@@ -1682,6 +1691,7 @@ class Doctor:
         cfg = Config.load(self.root)
         self.check(True, "harness/config.json is valid")
         self.config(cfg)
+        self.project_section()
         self.baseline(cfg)
         if self.models:
             self.models_check(cfg)
@@ -1713,10 +1723,25 @@ class Doctor:
         for line in bad:
             self.check(False, f".worktreeinclude line rejected: {line}", "relative paths only, no '..'")
 
+    def project_section(self):
+        """AGENTS.md §1 still holding the template's `<...>` placeholders: the orchestrator fills it in."""
+        p = self.root / "AGENTS.md"
+        text = p.read_text() if p.exists() else ""
+        start = text.find("## 1.")
+        section = text[start : text.find("## 2.", start)] if start >= 0 else ""
+        if PLACEHOLDER_RE.search(section):
+            self.notes.append("AGENTS.md §1 is not filled in yet: the orchestrator asks you before the first feature")
+
     def baseline(self, cfg: Config):
         """test_cmd on the main checkout: a red baseline would be blamed on the first feature's implementer."""
         if not self.tests:
             self.notes.append("test_cmd not run (--no-tests)")
+            return
+        if not Git(self.root).project_paths():
+            self.notes.append(
+                "no project code yet (only the template's files): test_cmd not run; "
+                "the first feature sets the project up so that it passes"
+            )
             return
         code, out = shell(cfg.test_cmd, self.root)
         fix = (
