@@ -104,22 +104,21 @@ Recorded one by one in `## Checked`; any unchecked box means `CHANGES_REQUESTED`
 
 `blocked` triggers rules 1 and 7 only; `merge` also requires `verdict: APPROVED`. When a role stops, the
 launcher runs rules 1–5 and 7–11 and requires a clean worktree; a role that leaves any of them red has
-not finished (NEEDS_ATTENTION, or sent back by the driver, three times at most). Commands and checks
+not finished (the driver sends it back, three times at most, then stops for the human). Commands and checks
 come from the main checkout's `config.json`, so a branch cannot change what it is tested with.
 
 ## 8. Launcher semantics not in `--help`
 
-- `run`/`wait` exit 0 DONE, 3 STILL_WORKING (call `wait`), 2 NEEDS_ATTENTION, 1 error. "Done" is
-  decided from the files on disk and a green check, never from the agent's screen alone.
+- A role run is done when the files on disk say so and the check is green, never from the agent's
+  screen alone.
 - `drive <slug> "msg"`: the message goes to the first role run. At a gate, to the role that produced
   what is judged (spec → spec_author, merge → implementer); when blocked, to the implementer if the spec
   was ever approved, else the spec_author. `--tab` runs the driver in the feature's workspace and
   returns; when it stops, it prompts the pane it was started from with `harness: <slug> ...`. At the
   merge gate a worktree with uncommitted changes stops the driver ("needs you") instead of merging; after
   an `auto` merge, `merge` itself prompts that pane with the outcome (merged at `<sha>`, or why it failed).
-- While a driver runs a feature, `run` and `merge` refuse it; while a role agent is still working,
-  `run` refuses to prompt it and the driver waits, up to `max_role_minutes` per role run; past that it
-  stops for the human and leaves the agent running.
+- While a driver runs a feature, `merge` refuses it. The driver waits for a role agent up to
+  `max_role_minutes` per role run; past that it stops for the human and leaves the agent running.
 
 ## 9. Trust model
 
